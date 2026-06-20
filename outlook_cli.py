@@ -314,6 +314,42 @@ def mark_read_cmd(message_id):
     print(json.dumps({"status": "ok", "message_id": message_id}))
 
 
+@cli.command("flag")
+@click.argument("message_id")
+def flag_email(message_id):
+    """Flag an email for follow-up by message_id."""
+    mapi = get_mapi()
+    msg = _get_item(mapi, message_id)
+    msg.FlagStatus = 1
+    msg.PropertyAccessor.SetProperty(PR_TODO_ITEM_FLAGS, 1)
+    msg.Save()
+    print(json.dumps({"status": "flagged", "message_id": message_id, "subject": msg.Subject}))
+
+
+@cli.command("complete-flag")
+@click.argument("message_id")
+def complete_flag(message_id):
+    """Mark a flagged email as complete by message_id."""
+    mapi = get_mapi()
+    msg = _get_item(mapi, message_id)
+    msg.FlagStatus = 2
+    msg.PropertyAccessor.SetProperty(PR_TODO_ITEM_FLAGS, 0)
+    msg.Save()
+    print(json.dumps({"status": "complete", "message_id": message_id, "subject": msg.Subject}))
+
+
+@cli.command("unflag")
+@click.argument("message_id")
+def unflag_email(message_id):
+    """Remove the flag from an email by message_id."""
+    mapi = get_mapi()
+    msg = _get_item(mapi, message_id)
+    msg.FlagStatus = 0
+    msg.PropertyAccessor.SetProperty(PR_TODO_ITEM_FLAGS, 0)
+    msg.Save()
+    print(json.dumps({"status": "unflagged", "message_id": message_id, "subject": msg.Subject}))
+
+
 @cli.command("folders")
 def list_folders():
     """List Outlook folders and item counts."""
