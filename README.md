@@ -29,7 +29,7 @@ python "C:/path/to/outlook_cli.py" "$@"
 ```
 Then `chmod +x ~/.local/bin/outlook-cli`.
 
-> **Note:** Use PowerShell for `read`, `attach`, `mark-read`, and `flagged`. These commands open individual emails via COM, which fails in Git Bash due to apartment model differences. `list` and `folders` work from either shell.
+> **Note:** Use PowerShell for any command that operates on an individual email (`read`, `attach`, `mark-read`, `flag`, `complete-flag`, `unflag`, `flagged`). These open items via COM, which fails in Git Bash due to apartment model differences. `list` and `folders` work from either shell.
 
 ## Commands
 
@@ -60,7 +60,7 @@ Without filters, returns the 20 most recent emails. With `--flagged`, `--flag-co
 
 **Folders:** `inbox`, `sent`, `drafts`, `deleted`, `outbox`, `junk`
 
-Each result includes a `message_id` field — use this for `read`, `attach`, and `mark-read`.
+Each result includes a `message_id` field — use this for all per-email commands.
 
 ### `read`
 Read the full body of an email by its `message_id`.
@@ -78,6 +78,27 @@ outlook-cli attach <message_id> ONT-15 --mark-read
 ```
 
 The PDF is generated via Edge headless, uploaded to Linear's file storage, and linked as a named attachment on the issue with sender and date as subtitle.
+
+### `flag`
+Flag an email for follow-up.
+
+```
+outlook-cli flag <message_id>
+```
+
+### `complete-flag`
+Mark a flagged email as complete.
+
+```
+outlook-cli complete-flag <message_id>
+```
+
+### `unflag`
+Remove the flag from an email entirely.
+
+```
+outlook-cli unflag <message_id>
+```
 
 ### `mark-read`
 Mark an email as read.
@@ -97,7 +118,7 @@ outlook-cli folders
 
 ## For AI Assistants
 
-All commands output JSON. Use PowerShell for any command that opens an individual email (`read`, `attach`, `mark-read`, `flagged`).
+All commands output JSON. Use PowerShell for any command that opens an individual email (`read`, `attach`, `mark-read`, `flag`, `complete-flag`, `unflag`, `flagged`).
 
 ### Reviewing flagged emails (recommended)
 
