@@ -14,12 +14,20 @@ COM-based command-line access to Outlook on Windows. Read emails, inspect thread
 pip install pywin32 click requests
 ```
 
-Add `outlook-cli.cmd` to a directory on your PATH (e.g. `~/.local/bin`):
+Add launchers to a directory on your PATH (e.g. `~/.local/bin`):
 
+**PowerShell / cmd** (`outlook-cli.cmd`):
 ```bat
 @echo off
 python "C:\path\to\outlook_cli.py" %*
 ```
+
+**Bash / Git Bash** (`outlook-cli`, no extension):
+```sh
+#!/bin/sh
+python "C:/path/to/outlook_cli.py" "$@"
+```
+Then `chmod +x ~/.local/bin/outlook-cli`.
 
 ## Commands
 
