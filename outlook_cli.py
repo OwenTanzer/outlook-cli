@@ -17,6 +17,7 @@ LINEAR_CLI = str(Path.home() / ".cargo" / "bin" / "linear-cli.exe")
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 LINEAR_API = "https://api.linear.app/graphql"
 PR_INTERNET_MESSAGE_ID = "http://schemas.microsoft.com/mapi/proptag/0x1035001F"
+PR_TODO_ITEM_FLAGS = "http://schemas.microsoft.com/mapi/proptag/0x0E2B0003"
 
 
 def _linear_token():
@@ -51,6 +52,33 @@ def _internet_message_id(msg):
         return None
 
 
+def _todo_flagged(msg):
+    """Return True if item is flagged via the M365 To-Do system (PR_TODO_ITEM_FLAGS bit 0)."""
+    try:
+        flags = msg.PropertyAccessor.GetProperty(PR_TODO_ITEM_FLAGS)
+        return bool(flags and (flags & 1))
+    except Exception:
+        return False
+
+
+def _flag_status(msg):
+    """Resolve flag state, matching Outlook's native search behaviour.
+
+    PR_TODO_ITEM_FLAGS (the M365 To-Do bit) is checked first because it is
+    authoritative for what Outlook's 'Flagged' search view shows. Some items
+    have FlagStatus=2 (classic 'complete') but PR_TODO=1 (still active in
+    To-Do) — Outlook treats those as active flags, so we do too.
+    """
+    if _todo_flagged(msg):
+        return "flagged"
+    classic = getattr(msg, "FlagStatus", 0)
+    if classic == 1:
+        return "flagged"
+    if classic == 2:
+        return "complete"
+    return "none"
+
+
 def _get_item(mapi, message_id):
     """Find a mail item by InternetMessageId — stable across sessions."""
     for store in mapi.Folders:
@@ -80,7 +108,7 @@ def mail_to_dict(msg, index=None, include_body=False):
         "sender_email": msg.SenderEmailAddress,
         "received": received,
         "unread": bool(msg.UnRead),
-        "flag_status": {0: "none", 1: "flagged", 2: "complete"}.get(getattr(msg, "FlagStatus", 0), "none"),
+        "flag_status": _flag_status(msg),
         "has_attachments": bool(msg.Attachments.Count),
         "size_bytes": msg.Size,
     }
@@ -133,31 +161,32 @@ def list_emails(count, unread_only, flagged, flag_complete, folder):
 
     folder_obj = _find_folder(mapi, folder)
     items = folder_obj.Items
-    items.Sort("[ReceivedTime]", True)
+    # Do NOT call items.Sort() — it causes COM iterator to silently skip items.
+    # Collect everything, sort in Python instead.
 
-    results = []
-    idx = 0
+    collected = []
     for msg in items:
-        if limit is not None and len(results) >= limit and not is_filtered:
-            break
         try:
             if getattr(msg, "Class", None) != 43:
                 continue
             if unread_only and not msg.UnRead:
                 continue
-            if flagged and getattr(msg, "FlagStatus", 0) != 1:
+            fs = _flag_status(msg)
+            if flagged and fs != "flagged":
                 continue
-            if flag_complete and getattr(msg, "FlagStatus", 0) != 2:
+            if flag_complete and fs != "complete":
                 continue
-            results.append(mail_to_dict(msg, index=idx))
-            idx += 1
+            collected.append(mail_to_dict(msg))
         except Exception:
             continue
 
+    collected.sort(key=lambda m: m.get("received") or "", reverse=True)
     if limit is not None:
-        results = results[:limit]
+        collected = collected[:limit]
+    for idx, m in enumerate(collected):
+        m["index"] = idx
 
-    print(json.dumps(results, indent=2, default=str))
+    print(json.dumps(collected, indent=2, default=str))
 
 
 @cli.command("flagged")
@@ -168,21 +197,22 @@ def show_flagged(include_complete, preview):
     """Show all flagged emails with body previews in a single pass.
 
     Returns everything needed for review — no separate 'read' calls required.
+    Detects both classic Outlook flags and M365 To-Do flags.
     """
     mapi = get_mapi()
     folder = _find_folder(mapi, "inbox")
     items = folder.Items
-    items.Sort("[ReceivedTime]", True)
+    # Do NOT call items.Sort() — it causes COM iterator to silently skip items.
 
     results = []
     for msg in items:
         try:
             if getattr(msg, "Class", None) != 43:
                 continue
-            fs = getattr(msg, "FlagStatus", 0)
-            if include_complete and fs not in (1, 2):
+            fs = _flag_status(msg)
+            if fs == "none":
                 continue
-            if not include_complete and fs != 1:
+            if not include_complete and fs == "complete":
                 continue
             data = mail_to_dict(msg, include_body=True)
             if preview > 0 and data.get("body"):
@@ -191,6 +221,7 @@ def show_flagged(include_complete, preview):
         except Exception:
             continue
 
+    results.sort(key=lambda m: m.get("received") or "", reverse=True)
     print(json.dumps(results, indent=2, default=str))
 
 
