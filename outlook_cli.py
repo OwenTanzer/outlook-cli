@@ -114,10 +114,11 @@ def list_emails(count, unread_only, flagged, folder):
     items = folder_obj.Items
     items.Sort("[ReceivedTime]", True)
 
+    is_filtered = unread_only or flagged
     results = []
     idx = 0
     for msg in items:
-        if len(results) >= count:
+        if not is_filtered and len(results) >= count:
             break
         try:
             if getattr(msg, "Class", None) != 43:  # 43 = olMail
@@ -130,6 +131,7 @@ def list_emails(count, unread_only, flagged, folder):
             idx += 1
         except Exception:
             continue
+    results = results[:count]
 
     print(json.dumps(results, indent=2, default=str))
 
