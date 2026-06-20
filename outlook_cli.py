@@ -145,46 +145,7 @@ def read_email(entry_id):
 @click.argument("issue_id")
 @click.option("--mark-read", is_flag=True, help="Mark the email as read after attaching")
 def attach(entry_id, issue_id, mark_read):
-    """Attach an email to an existing Linear issue as a comment.
-
-    ENTRY_ID  — Outlook email EntryID (from 'list')
-    ISSUE_ID  — Linear issue identifier, e.g. ONT-18
-    """
-    mapi = get_mapi()
-    msg = mapi.GetItemFromID(entry_id)
-
-    body = (
-        f"**From:** {msg.SenderName} <{msg.SenderEmailAddress}>  \n"
-        f"**Subject:** {msg.Subject or '(no subject)'}  \n"
-        f"**Received:** {msg.ReceivedTime}  \n\n"
-        f"---\n\n"
-        f"{msg.Body}"
-    )
-
-    cmd = [LINEAR_CLI, "comments", "create", issue_id, "--body", body, "--output", "json", "--quiet"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        print(json.dumps({"error": result.stderr.strip()}), file=sys.stderr)
-        sys.exit(1)
-
-    if mark_read:
-        msg.UnRead = False
-        msg.Save()
-
-    try:
-        comment_data = json.loads(result.stdout)
-        print(json.dumps({"status": "attached", "marked_read": mark_read, "comment": comment_data}, indent=2))
-    except json.JSONDecodeError:
-        print(result.stdout)
-
-
-@cli.command("attach-pdf")
-@click.argument("entry_id")
-@click.argument("issue_id")
-@click.option("--mark-read", is_flag=True, help="Mark the email as read after attaching")
-def attach_pdf(entry_id, issue_id, mark_read):
-    """Convert an email to PDF and attach it to a Linear issue.
+    """Attach an email to an existing Linear issue as a PDF.
 
     ENTRY_ID  — Outlook email EntryID (from 'list')
     ISSUE_ID  — Linear issue identifier, e.g. ONT-15
@@ -197,7 +158,6 @@ def attach_pdf(entry_id, issue_id, mark_read):
         html_path = os.path.join(tmp, "email.html")
         pdf_path = os.path.join(tmp, "email.pdf")
 
-        # Save as HTML then convert to PDF via Edge headless
         msg.SaveAs(html_path, 5)  # 5 = olHTML
         subprocess.run(
             [EDGE, "--headless", f"--print-to-pdf={pdf_path}", f"file:///{html_path}"],
@@ -207,7 +167,6 @@ def attach_pdf(entry_id, issue_id, mark_read):
         pdf_size = os.path.getsize(pdf_path)
         filename = f"{subject[:60].replace('/', '-')}.pdf"
 
-        # Get a signed upload URL from Linear
         upload_resp = _linear_query("""
             mutation Upload($filename: String!, $size: Int!) {
               fileUpload(filename: $filename, contentType: "application/pdf", size: $size) {
@@ -221,14 +180,12 @@ def attach_pdf(entry_id, issue_id, mark_read):
         upload_headers = {h["key"]: h["value"] for h in upload["headers"]}
         upload_headers["Content-Type"] = "application/pdf"
 
-        # Upload PDF to Linear's GCS bucket
         with open(pdf_path, "rb") as f:
             put_resp = requests.put(upload["uploadUrl"], data=f, headers=upload_headers)
         put_resp.raise_for_status()
 
         asset_url = upload["assetUrl"]
 
-    # Create the attachment on the Linear issue
     result = subprocess.run(
         [LINEAR_CLI, "attachments", "create", issue_id,
          "--title", f"Email: {subject}",
