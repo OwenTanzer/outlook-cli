@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""Outlook CLI — COM-based command-line access to Outlook on Windows."""
+
+import sys
+import json
+import subprocess
+from pathlib import Path
+
+import click
+import win32com.client
+
+LINEAR_CLI = str(Path.home() / ".cargo" / "bin" / "linear-cli.exe")
+
+# olDefaultFolders constants
+FOLDER_IDS = {
+    "inbox": 6,
+    "sent": 5,
+    "drafts": 16,
+    "deleted": 3,
+    "outbox": 4,
+    "junk": 23,
+}
+
+
+def get_mapi():
+    outlook = win32com.client.Dispatch("Outlook.Application")
+    return outlook.GetNamespace("MAPI")
+
+
+def mail_to_dict(msg, index=None, include_body=False):
+    try:
+        received = msg.ReceivedTime.isoformat()
+    except Exception:
+        received = None
+    d = {
+        "index": index,
+        "entry_id": msg.EntryID,
+        "subject": msg.Subject or "(no subject)",
+        "sender": msg.SenderName,
+        "sender_email": msg.SenderEmailAddress,
+        "received": received,
+        "unread": bool(msg.UnRead),
+        "has_attachments": bool(msg.Attachments.Count),
+        "size_bytes": msg.Size,
+    }
+    if include_body:
+        d["body"] = msg.Body
+    return d
+
+
+@click.group()
+def cli():
+    """Outlook CLI — COM-based command-line access to Outlook on Windows."""
+    pass
+
+
+def _find_folder(mapi, folder_name):
+    """Find a named folder across all mail stores, newest-first."""
+    target = folder_name.lower().replace(" ", "")
+    aliases = {
+        "inbox": ["inbox"],
+        "sent": ["sentitems", "sent"],
+        "drafts": ["drafts"],
+        "deleted": ["deleteditems", "deleted"],
+        "outbox": ["outbox"],
+        "junk": ["junkemail", "junk", "spam"],
+    }
+    candidates = aliases.get(target, [target])
+    for store in mapi.Folders:
+        for sub in store.Folders:
+            sub_key = sub.Name.lower().replace(" ", "")
+            if sub_key in candidates:
+                return sub
+    # Fallback: default inbox
+    return mapi.GetDefaultFolder(6)
+
+
+@cli.command("list")
+@click.option("--count", "-n", default=20, show_default=True, help="Max emails to return")
+@click.option("--unread-only", is_flag=True, help="Only show unread emails")
+@click.option("--folder", default="inbox", show_default=True,
+              help="Folder name: inbox, sent, drafts, deleted, outbox, junk")
+def list_emails(count, unread_only, folder):
+    """List recent emails. Outputs JSON array ordered newest-first."""
+    mapi = get_mapi()
+    folder_obj = _find_folder(mapi, folder)
+    items = folder_obj.Items
+    items.Sort("[ReceivedTime]", True)
+
+    results = []
+    idx = 0
+    for msg in items:
+        if len(results) >= count:
+            break
+        try:
+            if getattr(msg, "Class", None) != 43:  # 43 = olMail
+                continue
+            if unread_only and not msg.UnRead:
+                continue
+            results.append(mail_to_dict(msg, index=idx))
+            idx += 1
+        except Exception:
+            continue
+
+    print(json.dumps(results, indent=2, default=str))
+
+
+@cli.command("read")
+@click.argument("entry_id")
+def read_email(entry_id):
+    """Read full email body by EntryID. Get EntryIDs from 'list'."""
+    mapi = get_mapi()
+    msg = mapi.GetItemFromID(entry_id)
+    data = mail_to_dict(msg, include_body=True)
+    print(json.dumps(data, indent=2, default=str))
+
+
+@cli.command("create-issue")
+@click.argument("entry_id")
+@click.option("--team", "-t", required=True, help="Linear team identifier (e.g. ONT)")
+@click.option("--title", help="Override issue title (default: email subject)")
+@click.option("--priority", "-p", type=int, help="Priority: 0=none 1=urgent 2=high 3=normal 4=low")
+@click.option("--assignee", "-a", help="Assignee name, email, or 'me'")
+@click.option("--state", "-s", help="Initial state name")
+@click.option("--mark-read", is_flag=True, help="Mark the email as read after routing")
+def create_issue(entry_id, team, title, priority, assignee, state, mark_read):
+    """Create a Linear issue from an email.
+
+    The issue title defaults to the email subject. The description is populated
+    with sender info and the plain-text body.
+    """
+    mapi = get_mapi()
+    msg = mapi.GetItemFromID(entry_id)
+
+    issue_title = title or (msg.Subject or "(no subject)")
+    description = (
+        f"**From:** {msg.SenderName} <{msg.SenderEmailAddress}>  \n"
+        f"**Received:** {msg.ReceivedTime}  \n\n"
+        f"---\n\n"
+        f"{msg.Body}"
+    )
+
+    cmd = [
+        LINEAR_CLI, "issues", "create", issue_title,
+        "--team", team,
+        "--description", description,
+        "--output", "json",
+        "--quiet",
+    ]
+    if priority is not None:
+        cmd += ["--priority", str(priority)]
+    if assignee:
+        cmd += ["--assignee", assignee]
+    if state:
+        cmd += ["--state", state]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        print(json.dumps({"error": result.stderr.strip()}), file=sys.stderr)
+        sys.exit(1)
+
+    if mark_read:
+        msg.UnRead = False
+        msg.Save()
+
+    try:
+        issue_data = json.loads(result.stdout)
+        print(json.dumps({"status": "created", "marked_read": mark_read, "issue": issue_data}, indent=2))
+    except json.JSONDecodeError:
+        print(result.stdout)
+
+
+@cli.command("mark-read")
+@click.argument("entry_id")
+def mark_read_cmd(entry_id):
+    """Mark an email as read by EntryID."""
+    mapi = get_mapi()
+    msg = mapi.GetItemFromID(entry_id)
+    msg.UnRead = False
+    msg.Save()
+    print(json.dumps({"status": "ok", "entry_id": entry_id}))
+
+
+@cli.command("folders")
+def list_folders():
+    """List top-level Outlook folders and subfolders with item counts."""
+    mapi = get_mapi()
+    folders = []
+    for store in mapi.Folders:
+        for sub in store.Folders:
+            try:
+                folders.append({
+                    "store": store.Name,
+                    "folder": sub.Name,
+                    "count": sub.Items.Count,
+                })
+            except Exception:
+                continue
+    print(json.dumps(folders, indent=2))
+
+
+if __name__ == "__main__":
+    cli()
