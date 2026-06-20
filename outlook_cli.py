@@ -65,6 +65,7 @@ def mail_to_dict(msg, index=None, include_body=False):
         "sender_email": msg.SenderEmailAddress,
         "received": received,
         "unread": bool(msg.UnRead),
+        "flag_status": {0: "none", 1: "flagged", 2: "complete"}.get(getattr(msg, "FlagStatus", 0), "none"),
         "has_attachments": bool(msg.Attachments.Count),
         "size_bytes": msg.Size,
     }
@@ -103,9 +104,10 @@ def _find_folder(mapi, folder_name):
 @cli.command("list")
 @click.option("--count", "-n", default=20, show_default=True, help="Max emails to return")
 @click.option("--unread-only", is_flag=True, help="Only show unread emails")
+@click.option("--flagged", is_flag=True, help="Only show flagged (follow-up) emails")
 @click.option("--folder", default="inbox", show_default=True,
               help="Folder name: inbox, sent, drafts, deleted, outbox, junk")
-def list_emails(count, unread_only, folder):
+def list_emails(count, unread_only, flagged, folder):
     """List recent emails. Outputs JSON array ordered newest-first."""
     mapi = get_mapi()
     folder_obj = _find_folder(mapi, folder)
@@ -121,6 +123,8 @@ def list_emails(count, unread_only, folder):
             if getattr(msg, "Class", None) != 43:  # 43 = olMail
                 continue
             if unread_only and not msg.UnRead:
+                continue
+            if flagged and getattr(msg, "FlagStatus", 0) not in (1, 2):
                 continue
             results.append(mail_to_dict(msg, index=idx))
             idx += 1
