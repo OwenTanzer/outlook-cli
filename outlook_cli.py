@@ -16,6 +16,7 @@ import win32com.client
 LINEAR_CLI = str(Path.home() / ".cargo" / "bin" / "linear-cli.exe")
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 LINEAR_API = "https://api.linear.app/graphql"
+PR_INTERNET_MESSAGE_ID = "http://schemas.microsoft.com/mapi/proptag/0x1035001F"
 
 
 def _linear_token():
@@ -36,20 +37,34 @@ def _linear_query(query, variables=None):
     resp.raise_for_status()
     return resp.json()
 
-# olDefaultFolders constants
-FOLDER_IDS = {
-    "inbox": 6,
-    "sent": 5,
-    "drafts": 16,
-    "deleted": 3,
-    "outbox": 4,
-    "junk": 23,
-}
-
 
 def get_mapi():
     outlook = win32com.client.Dispatch("Outlook.Application")
     return outlook.GetNamespace("MAPI")
+
+
+def _internet_message_id(msg):
+    try:
+        mid = msg.PropertyAccessor.GetProperty(PR_INTERNET_MESSAGE_ID)
+        return mid.strip("<>") if mid else None
+    except Exception:
+        return None
+
+
+def _get_item(mapi, message_id):
+    """Find a mail item by InternetMessageId — stable across sessions."""
+    for store in mapi.Folders:
+        for folder in store.Folders:
+            try:
+                for item in folder.Items:
+                    try:
+                        if _internet_message_id(item) == message_id:
+                            return item
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    raise click.ClickException(f"Email not found: {message_id}")
 
 
 def mail_to_dict(msg, index=None, include_body=False):
@@ -59,7 +74,7 @@ def mail_to_dict(msg, index=None, include_body=False):
         received = None
     d = {
         "index": index,
-        "entry_id": msg.EntryID,
+        "message_id": _internet_message_id(msg),
         "subject": msg.Subject or "(no subject)",
         "sender": msg.SenderName,
         "sender_email": msg.SenderEmailAddress,
@@ -81,7 +96,6 @@ def cli():
 
 
 def _find_folder(mapi, folder_name):
-    """Find a named folder across all mail stores, newest-first."""
     target = folder_name.lower().replace(" ", "")
     aliases = {
         "inbox": ["inbox"],
@@ -94,77 +108,120 @@ def _find_folder(mapi, folder_name):
     candidates = aliases.get(target, [target])
     for store in mapi.Folders:
         for sub in store.Folders:
-            sub_key = sub.Name.lower().replace(" ", "")
-            if sub_key in candidates:
+            if sub.Name.lower().replace(" ", "") in candidates:
                 return sub
-    # Fallback: default inbox
     return mapi.GetDefaultFolder(6)
 
 
 @cli.command("list")
-@click.option("--count", "-n", default=20, show_default=True, help="Max emails to return")
+@click.option("--count", "-n", default=None, type=int,
+              help="Max emails to return (default: 20; unlimited when filtering)")
 @click.option("--unread-only", is_flag=True, help="Only show unread emails")
-@click.option("--flagged", is_flag=True, help="Only show flagged (follow-up) emails")
+@click.option("--flagged", is_flag=True, help="Only show actively flagged emails")
+@click.option("--flag-complete", is_flag=True, help="Only show flag-completed emails")
 @click.option("--folder", default="inbox", show_default=True,
-              help="Folder name: inbox, sent, drafts, deleted, outbox, junk")
-def list_emails(count, unread_only, flagged, folder):
-    """List recent emails. Outputs JSON array ordered newest-first."""
+              help="Folder: inbox, sent, drafts, deleted, outbox, junk")
+def list_emails(count, unread_only, flagged, flag_complete, folder):
+    """List recent emails as JSON, newest-first.
+
+    Filtering options (--flagged, --flag-complete, --unread-only) return all
+    matches by default. Use --count to cap results.
+    """
     mapi = get_mapi()
+    is_filtered = unread_only or flagged or flag_complete
+    limit = count if count is not None else (None if is_filtered else 20)
+
     folder_obj = _find_folder(mapi, folder)
     items = folder_obj.Items
     items.Sort("[ReceivedTime]", True)
 
-    is_filtered = unread_only or flagged
     results = []
     idx = 0
     for msg in items:
-        if not is_filtered and len(results) >= count:
+        if limit is not None and len(results) >= limit and not is_filtered:
             break
         try:
-            if getattr(msg, "Class", None) != 43:  # 43 = olMail
+            if getattr(msg, "Class", None) != 43:
                 continue
             if unread_only and not msg.UnRead:
                 continue
-            if flagged and getattr(msg, "FlagStatus", 0) not in (1, 2):
+            if flagged and getattr(msg, "FlagStatus", 0) != 1:
+                continue
+            if flag_complete and getattr(msg, "FlagStatus", 0) != 2:
                 continue
             results.append(mail_to_dict(msg, index=idx))
             idx += 1
         except Exception:
             continue
-    results = results[:count]
+
+    if limit is not None:
+        results = results[:limit]
+
+    print(json.dumps(results, indent=2, default=str))
+
+
+@cli.command("flagged")
+@click.option("--include-complete", is_flag=True, help="Also include flag-completed emails")
+@click.option("--preview", default=500, show_default=True,
+              help="Body preview length in characters (0 for full body)")
+def show_flagged(include_complete, preview):
+    """Show all flagged emails with body previews in a single pass.
+
+    Returns everything needed for review — no separate 'read' calls required.
+    """
+    mapi = get_mapi()
+    folder = _find_folder(mapi, "inbox")
+    items = folder.Items
+    items.Sort("[ReceivedTime]", True)
+
+    results = []
+    for msg in items:
+        try:
+            if getattr(msg, "Class", None) != 43:
+                continue
+            fs = getattr(msg, "FlagStatus", 0)
+            if include_complete and fs not in (1, 2):
+                continue
+            if not include_complete and fs != 1:
+                continue
+            data = mail_to_dict(msg, include_body=True)
+            if preview > 0 and data.get("body"):
+                data["body"] = data["body"][:preview]
+            results.append(data)
+        except Exception:
+            continue
 
     print(json.dumps(results, indent=2, default=str))
 
 
 @cli.command("read")
-@click.argument("entry_id")
-def read_email(entry_id):
-    """Read full email body by EntryID. Get EntryIDs from 'list'."""
+@click.argument("message_id")
+def read_email(message_id):
+    """Read a full email by its message_id (from 'list' output)."""
     mapi = get_mapi()
-    msg = mapi.GetItemFromID(entry_id)
-    data = mail_to_dict(msg, include_body=True)
-    print(json.dumps(data, indent=2, default=str))
+    msg = _get_item(mapi, message_id)
+    print(json.dumps(mail_to_dict(msg, include_body=True), indent=2, default=str))
 
 
 @cli.command("attach")
-@click.argument("entry_id")
+@click.argument("message_id")
 @click.argument("issue_id")
 @click.option("--mark-read", is_flag=True, help="Mark the email as read after attaching")
-def attach(entry_id, issue_id, mark_read):
+def attach(message_id, issue_id, mark_read):
     """Attach an email to an existing Linear issue as a PDF.
 
-    ENTRY_ID  — Outlook email EntryID (from 'list')
-    ISSUE_ID  — Linear issue identifier, e.g. ONT-15
+    MESSAGE_ID — from 'list' or 'flagged' output (message_id field)
+    ISSUE_ID   — Linear issue identifier, e.g. ONT-15
     """
     mapi = get_mapi()
-    msg = mapi.GetItemFromID(entry_id)
+    msg = _get_item(mapi, message_id)
     subject = msg.Subject or "email"
 
     with tempfile.TemporaryDirectory() as tmp:
         html_path = os.path.join(tmp, "email.html")
         pdf_path = os.path.join(tmp, "email.pdf")
 
-        msg.SaveAs(html_path, 5)  # 5 = olHTML
+        msg.SaveAs(html_path, 5)
         subprocess.run(
             [EDGE, "--headless", f"--print-to-pdf={pdf_path}", f"file:///{html_path}"],
             check=True, capture_output=True,
@@ -189,7 +246,6 @@ def attach(entry_id, issue_id, mark_read):
         with open(pdf_path, "rb") as f:
             put_resp = requests.put(upload["uploadUrl"], data=f, headers=upload_headers)
         put_resp.raise_for_status()
-
         asset_url = upload["assetUrl"]
 
     result = subprocess.run(
@@ -217,19 +273,19 @@ def attach(entry_id, issue_id, mark_read):
 
 
 @cli.command("mark-read")
-@click.argument("entry_id")
-def mark_read_cmd(entry_id):
-    """Mark an email as read by EntryID."""
+@click.argument("message_id")
+def mark_read_cmd(message_id):
+    """Mark an email as read by message_id."""
     mapi = get_mapi()
-    msg = mapi.GetItemFromID(entry_id)
+    msg = _get_item(mapi, message_id)
     msg.UnRead = False
     msg.Save()
-    print(json.dumps({"status": "ok", "entry_id": entry_id}))
+    print(json.dumps({"status": "ok", "message_id": message_id}))
 
 
 @cli.command("folders")
 def list_folders():
-    """List top-level Outlook folders and subfolders with item counts."""
+    """List Outlook folders and item counts."""
     mapi = get_mapi()
     folders = []
     for store in mapi.Folders:
