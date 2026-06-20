@@ -115,45 +115,28 @@ def read_email(entry_id):
     print(json.dumps(data, indent=2, default=str))
 
 
-@cli.command("create-issue")
+@cli.command("attach")
 @click.argument("entry_id")
-@click.option("--team", "-t", required=True, help="Linear team identifier (e.g. ONT)")
-@click.option("--title", help="Override issue title (default: email subject)")
-@click.option("--priority", "-p", type=int, help="Priority: 0=none 1=urgent 2=high 3=normal 4=low")
-@click.option("--assignee", "-a", help="Assignee name, email, or 'me'")
-@click.option("--state", "-s", help="Initial state name")
-@click.option("--mark-read", is_flag=True, help="Mark the email as read after routing")
-def create_issue(entry_id, team, title, priority, assignee, state, mark_read):
-    """Create a Linear issue from an email.
+@click.argument("issue_id")
+@click.option("--mark-read", is_flag=True, help="Mark the email as read after attaching")
+def attach(entry_id, issue_id, mark_read):
+    """Attach an email to an existing Linear issue as a comment.
 
-    The issue title defaults to the email subject. The description is populated
-    with sender info and the plain-text body.
+    ENTRY_ID  — Outlook email EntryID (from 'list')
+    ISSUE_ID  — Linear issue identifier, e.g. ONT-18
     """
     mapi = get_mapi()
     msg = mapi.GetItemFromID(entry_id)
 
-    issue_title = title or (msg.Subject or "(no subject)")
-    description = (
+    body = (
         f"**From:** {msg.SenderName} <{msg.SenderEmailAddress}>  \n"
+        f"**Subject:** {msg.Subject or '(no subject)'}  \n"
         f"**Received:** {msg.ReceivedTime}  \n\n"
         f"---\n\n"
         f"{msg.Body}"
     )
 
-    cmd = [
-        LINEAR_CLI, "issues", "create", issue_title,
-        "--team", team,
-        "--description", description,
-        "--output", "json",
-        "--quiet",
-    ]
-    if priority is not None:
-        cmd += ["--priority", str(priority)]
-    if assignee:
-        cmd += ["--assignee", assignee]
-    if state:
-        cmd += ["--state", state]
-
+    cmd = [LINEAR_CLI, "comments", "create", issue_id, "--body", body, "--output", "json", "--quiet"]
     result = subprocess.run(cmd, capture_output=True, text=True)
 
     if result.returncode != 0:
@@ -165,8 +148,8 @@ def create_issue(entry_id, team, title, priority, assignee, state, mark_read):
         msg.Save()
 
     try:
-        issue_data = json.loads(result.stdout)
-        print(json.dumps({"status": "created", "marked_read": mark_read, "issue": issue_data}, indent=2))
+        comment_data = json.loads(result.stdout)
+        print(json.dumps({"status": "attached", "marked_read": mark_read, "comment": comment_data}, indent=2))
     except json.JSONDecodeError:
         print(result.stdout)
 
