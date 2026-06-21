@@ -97,8 +97,22 @@ def _flag_status(msg):
 
 
 def _get_item(mapi, message_id):
-    """Find a mail item by InternetMessageId — stable across sessions."""
-    _dbg("_get_item scan start")
+    """Find a mail item by InternetMessageId — Restrict-first, full-scan fallback."""
+    filter_str = f'@SQL="{PR_INTERNET_MESSAGE_ID}" = \'<{message_id}>\''
+
+    # Fast path: DASL Restrict on inbox (~15ms, server-side indexed lookup).
+    _dbg("_get_item: trying DASL Restrict on inbox")
+    try:
+        inbox = _find_folder(mapi, "inbox")
+        item = inbox.Items.Restrict(filter_str).GetFirst()
+        if item:
+            _dbg("_get_item: found via Restrict")
+            return item
+    except Exception as e:
+        _dbg(f"_get_item: Restrict failed ({e})")
+
+    # Fallback: full scan across all folders (catches sent items, subfolders, etc.)
+    _dbg("_get_item: falling back to full scan")
     scanned = 0
     for store in mapi.Folders:
         for folder in store.Folders:
@@ -107,13 +121,13 @@ def _get_item(mapi, message_id):
                     scanned += 1
                     try:
                         if _internet_message_id(item) == message_id:
-                            _dbg(f"_get_item found after {scanned} items")
+                            _dbg(f"_get_item: found via scan after {scanned} items")
                             return item
                     except Exception:
                         pass
             except Exception:
                 pass
-    _dbg(f"_get_item exhausted {scanned} items — not found")
+    _dbg(f"_get_item: exhausted {scanned} items — not found")
     raise click.ClickException(f"Email not found: {message_id}")
 
 
