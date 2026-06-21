@@ -52,15 +52,16 @@ ont-cli list
 ont-cli list -n 10
 ont-cli list --unread-only
 ont-cli list --flagged
+ont-cli list --category Research
 ont-cli list --folder sent
 ont-cli list --unread-only --format table
 ```
 
-Without filters, returns the 20 most recent emails. With `--flagged` or `--unread-only`, returns all matches (use `-n` to cap).
+Without filters, returns the 20 most recent emails. With `--flagged`, `--unread-only`, or `--category`, returns all matches (use `-n` to cap). Multiple filters are ANDed together.
 
 **Folders:** `inbox`, `sent`, `drafts`, `deleted`, `outbox`, `junk`
 
-`--format table` prints a human-readable columnar view (default). Columns: date, unread (*), flagged (F), has-attachment (@), sender, subject. Use `--format json` for machine-readable output.
+`--format table` prints a human-readable columnar view (default). Columns: date, unread (*), flagged (F), has-attachment (@), sender, subject, category. Use `--format json` for machine-readable output.
 
 Each JSON result includes a `message_id` field — use this for all per-email commands.
 
@@ -83,6 +84,27 @@ ont-cli attach <message_id> ONT-15 --save-attachments
 The PDF is generated via Edge headless, uploaded to Linear's file storage, and linked as a named attachment on the issue with sender and date as subtitle.
 
 `--save-attachments` additionally uploads any file attachments from the email (PDFs, Word docs, etc.) as separate Linear attachments on the same issue. Use this when the email attachment is the primary content.
+
+### `categorize`
+Add or remove an Outlook category on an email.
+
+```
+ont-cli categorize <message_id> Research
+ont-cli categorize <message_id> "Gen. Info"
+ont-cli categorize <message_id> Research --remove
+```
+
+Categories are written to Outlook's native Categories field (visible in the Outlook UI) and appear in the CAT column of `list` table output. Use `list --category <name>` to filter by category. The typical triage workflow: categorize emails worth keeping, then `delete` everything without a category.
+
+### `delete`
+Move emails to Deleted Items. Accepts any number of message IDs, processed in one COM session.
+
+```
+ont-cli delete <message_id>
+ont-cli delete <id1> <id2> <id3> ...
+```
+
+Moves to Deleted Items — not permanent. Recover from Outlook's Deleted Items folder if needed.
 
 ### `flag`
 Flag an email for follow-up.
@@ -171,6 +193,7 @@ ont-cli list -n 20
 Each item includes:
 - `message_id` — stable RFC Message-ID, use for all subsequent commands
 - `subject`, `sender`, `sender_email`, `received`, `unread`, `flag_status`, `has_attachments`, `size_bytes`
+- `categories` — list of Outlook category strings (empty list if none)
 
 `flag_status` values: `"none"`, `"flagged"` (active), `"complete"`
 
@@ -202,8 +225,29 @@ ont-cli linear-update ONT-40 --parent ONT-4
 ont-cli linear-update ONT-40 --description "Details here"
 ```
 
+### Inbox triage workflow
+
+```powershell
+# 1. Pull a large batch as JSON
+$emails = ont-cli list -n 100 --format json | ConvertFrom-Json
+$emails | ForEach-Object { "$($_.index). $($_.received.Substring(0,10)) | $($_.sender) | $($_.subject)" }
+
+# 2. Categorize keepers
+ont-cli categorize $emails[4].message_id "Research"
+ont-cli categorize $emails[12].message_id "Gen. Info"
+
+# 3. Delete the rest (pass all unwanted IDs in one call)
+$removeIds = ($emails | Where-Object { $_.categories.Count -eq 0 } | ForEach-Object { $_.message_id })
+ont-cli delete $removeIds
+
+# 4. Review what you kept
+ont-cli list --category Research
+ont-cli list --category "Gen. Info"
+```
+
 ### Notes
 - `message_id` is the RFC 2822 Message-ID — stable across sessions and process boundaries
 - Outlook must be running (or will be launched) when any command executes
 - `attach` requires Edge at `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`
 - Linear OAuth token is read from `~\AppData\Roaming\linear-cli\config.toml`
+- Use PowerShell for per-email commands (`read`, `attach`, `mark-read`, `flag`, `unflag`, `flagged`, `categorize`, `delete`)

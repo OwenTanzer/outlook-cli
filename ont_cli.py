@@ -534,6 +534,26 @@ def mark_read_cmd(message_ids):
     print(json.dumps(results if len(results) > 1 else results[0], indent=2))
 
 
+@cli.command("delete")
+@click.argument("message_ids", nargs=-1, required=True)
+def delete_emails(message_ids):
+    """Move emails to Deleted Items. Accepts multiple message_ids in one COM session."""
+    mapi = get_mapi()
+    inbox = _find_folder(mapi, "inbox")
+    results = []
+    for mid in message_ids:
+        try:
+            flt = f'@SQL="{PR_INTERNET_MESSAGE_ID}" = \'<{mid}>\''
+            msg = inbox.Items.Restrict(flt).GetFirst()
+            if not msg:
+                msg = _get_item(mapi, mid)
+            msg.Delete()
+            results.append({"status": "ok", "message_id": mid})
+        except Exception as e:
+            results.append({"status": "error", "message_id": mid, "error": str(e)})
+    print(json.dumps(results if len(results) > 1 else results[0], indent=2))
+
+
 @cli.command("flag")
 @click.argument("message_id")
 def flag_email(message_id):
