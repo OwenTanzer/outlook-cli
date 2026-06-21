@@ -39,12 +39,13 @@ Show all actively flagged emails with body previews in a single pass. No separat
 ```
 outlook-cli flagged
 outlook-cli flagged --preview 0        # full body
+outlook-cli flagged --format table     # human-readable view with body snippet
 ```
 
-Returns newest-first. Body is truncated to 500 characters by default; `--preview 0` returns the full body.
+Returns newest-first. Body is truncated to 500 characters by default; `--preview 0` returns the full body. `--format table` (default) prints a columnar view with a 120-character body snippet per email. Use `--format json` for machine-readable output.
 
 ### `list`
-List recent emails from your inbox as JSON, ordered newest-first.
+List recent emails from your inbox, ordered newest-first.
 
 ```
 outlook-cli list
@@ -52,13 +53,16 @@ outlook-cli list -n 10
 outlook-cli list --unread-only
 outlook-cli list --flagged
 outlook-cli list --folder sent
+outlook-cli list --unread-only --format table
 ```
 
 Without filters, returns the 20 most recent emails. With `--flagged` or `--unread-only`, returns all matches (use `-n` to cap).
 
 **Folders:** `inbox`, `sent`, `drafts`, `deleted`, `outbox`, `junk`
 
-Each result includes a `message_id` field — use this for all per-email commands.
+`--format table` prints a human-readable columnar view (default). Columns: date, unread (•), flagged (F), has-attachment (@), sender, subject. Use `--format json` for machine-readable output.
+
+Each JSON result includes a `message_id` field — use this for all per-email commands.
 
 ### `read`
 Read the full body of an email by its `message_id`.

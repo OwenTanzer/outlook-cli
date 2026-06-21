@@ -132,6 +132,32 @@ def _get_item(mapi, message_id):
     raise click.ClickException(f"Email not found: {message_id}")
 
 
+def _print_table(emails, show_body=False):
+    """Print emails as a human-readable table to stdout."""
+    col_date = 10
+    col_flag = 1
+    col_att  = 1
+    col_unread = 1
+    col_sender = 24
+    col_subj = 52
+    header = (f"{'DATE':<{col_date}}  {'':>{col_unread}} {'':>{col_flag}} {'':>{col_att}}  "
+              f"{'SENDER':<{col_sender}}  {'SUBJECT':<{col_subj}}")
+    print(header)
+    print("-" * len(header))
+    for e in emails:
+        date   = (e.get("received") or "")[:col_date]
+        unread = "•" if e.get("unread") else " "
+        flag   = "F" if e.get("flag_status") == "flagged" else " "
+        att    = "@" if e.get("has_attachments") else " "
+        sender = (e.get("sender") or "")[:col_sender]
+        subj   = (e.get("subject") or "")[:col_subj]
+        print(f"{date:<{col_date}}  {unread:>{col_unread}} {flag:>{col_flag}} {att:>{col_att}}  "
+              f"{sender:<{col_sender}}  {subj:<{col_subj}}")
+        if show_body and e.get("body"):
+            body = e["body"].replace("\r", "").replace("\n", " ").strip()[:120]
+            print(f"{'':>{col_date + col_unread + col_flag + col_att + col_sender + 8}}{body}")
+
+
 def mail_to_dict(msg, index=None, include_body=False):
     try:
         received = msg.ReceivedTime.isoformat()
@@ -189,7 +215,9 @@ def _find_folder(mapi, folder_name):
 @click.option("--flagged", is_flag=True, help="Only show actively flagged emails")
 @click.option("--folder", default="inbox", show_default=True,
               help="Folder: inbox, sent, drafts, deleted, outbox, junk")
-def list_emails(count, unread_only, flagged, folder):
+@click.option("--format", "fmt", default="table", type=click.Choice(["json", "table"]),
+              help="Output format: table (default) or json")
+def list_emails(count, unread_only, flagged, folder, fmt):
     """List recent emails as JSON, newest-first.
 
     Filtering options (--flagged, --unread-only) return all matches by default.
@@ -282,13 +310,18 @@ def list_emails(count, unread_only, flagged, folder):
         m["index"] = idx
 
     _dbg(f"list: done, returning {len(collected)} results")
-    print(json.dumps(collected, indent=2, default=str))
+    if fmt == "table":
+        _print_table(collected)
+    else:
+        print(json.dumps(collected, indent=2, default=str))
 
 
 @cli.command("flagged")
 @click.option("--preview", default=500, show_default=True,
               help="Body preview length in characters (0 for full body)")
-def show_flagged(preview):
+@click.option("--format", "fmt", default="table", type=click.Choice(["json", "table"]),
+              help="Output format: table (default) or json")
+def show_flagged(preview, fmt):
     """Show all actively flagged emails with body previews in a single pass.
 
     Returns everything needed for review — no separate 'read' calls required.
@@ -340,7 +373,10 @@ def show_flagged(preview):
 
     results.sort(key=lambda m: m.get("received") or "", reverse=True)
     _dbg("flagged: done")
-    print(json.dumps(results, indent=2, default=str))
+    if fmt == "table":
+        _print_table(results, show_body=True)
+    else:
+        print(json.dumps(results, indent=2, default=str))
 
 
 @cli.command("read")
