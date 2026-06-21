@@ -146,7 +146,7 @@ def _print_table(emails, show_body=False):
     print("-" * len(header))
     for e in emails:
         date   = (e.get("received") or "")[:col_date]
-        unread = "•" if e.get("unread") else " "
+        unread = "*" if e.get("unread") else " "
         flag   = "F" if e.get("flag_status") == "flagged" else " "
         att    = "@" if e.get("has_attachments") else " "
         sender = (e.get("sender") or "")[:col_sender]
