@@ -10,6 +10,7 @@ import tomllib
 import time
 from pathlib import Path
 
+import mimetypes
 import click
 import requests
 import win32com.client
@@ -355,7 +356,8 @@ def read_email(message_id):
 @click.argument("message_id")
 @click.argument("issue_id")
 @click.option("--mark-read", is_flag=True, help="Mark the email as read after attaching")
-def attach(message_id, issue_id, mark_read):
+@click.option("--save-attachments", is_flag=True, help="Also upload email file attachments to the Linear issue")
+def attach(message_id, issue_id, mark_read, save_attachments):
     """Attach an email to an existing Linear issue as a PDF.
 
     MESSAGE_ID — from 'list' or 'flagged' output (message_id field)
@@ -415,9 +417,56 @@ def attach(message_id, issue_id, mark_read):
 
     try:
         att_data = json.loads(result.stdout)
-        print(json.dumps({"status": "attached", "url": asset_url, "attachment": att_data}, indent=2))
     except json.JSONDecodeError:
-        print(result.stdout)
+        att_data = {}
+
+    uploaded_attachments = []
+    if save_attachments and msg.Attachments.Count > 0:
+        with tempfile.TemporaryDirectory() as att_tmp:
+            for i in range(1, msg.Attachments.Count + 1):
+                att = msg.Attachments.Item(i)
+                att_filename = att.FileName
+                if not att_filename:
+                    continue
+                att_path = os.path.join(att_tmp, att_filename)
+                try:
+                    att.SaveAsFile(att_path)
+                    att_size = os.path.getsize(att_path)
+                    content_type = mimetypes.guess_type(att_filename)[0] or "application/octet-stream"
+
+                    up = _linear_query("""
+                        mutation Upload($filename: String!, $size: Int!, $ct: String!) {
+                          fileUpload(filename: $filename, contentType: $ct, size: $size) {
+                            success
+                            uploadFile { uploadUrl assetUrl headers { key value } }
+                          }
+                        }
+                    """, {"filename": att_filename, "size": att_size, "ct": content_type})
+
+                    uf = up["data"]["fileUpload"]["uploadFile"]
+                    uh = {h["key"]: h["value"] for h in uf["headers"]}
+                    uh["Content-Type"] = content_type
+                    with open(att_path, "rb") as f:
+                        requests.put(uf["uploadUrl"], data=f, headers=uh).raise_for_status()
+
+                    subprocess.run(
+                        [LINEAR_CLI, "attachments", "create", issue_id,
+                         "--title", att_filename,
+                         "--url", uf["assetUrl"],
+                         "--subtitle", f"Attachment from: {msg.SenderName}"],
+                        capture_output=True,
+                    )
+                    uploaded_attachments.append(att_filename)
+                    _dbg(f"attach: uploaded file attachment '{att_filename}'")
+                except Exception as e:
+                    _dbg(f"attach: failed to upload '{att_filename}' ({e})")
+
+    print(json.dumps({
+        "status": "attached",
+        "url": asset_url,
+        "attachment": att_data,
+        "file_attachments": uploaded_attachments,
+    }, indent=2))
 
 
 @cli.command("mark-read")

@@ -29,7 +29,7 @@ python "C:/path/to/outlook_cli.py" "$@"
 ```
 Then `chmod +x ~/.local/bin/outlook-cli`.
 
-> **Note:** Use PowerShell for any command that operates on an individual email (`read`, `attach`, `mark-read`, `flag`, `complete-flag`, `unflag`, `flagged`). These open items via COM, which fails in Git Bash due to apartment model differences. `list` and `folders` work from either shell.
+> **Note:** Use PowerShell for any command that operates on an individual email (`read`, `attach`, `mark-read`, `flag`, `unflag`, `flagged`). These open items via COM, which fails in Git Bash due to apartment model differences. `list`, `cleanup`, and `folders` work from either shell.
 
 ## Commands
 
@@ -73,9 +73,12 @@ Convert an email to PDF and attach it to an existing Linear issue.
 ```
 outlook-cli attach <message_id> <issue_id>
 outlook-cli attach <message_id> ONT-15 --mark-read
+outlook-cli attach <message_id> ONT-15 --save-attachments
 ```
 
 The PDF is generated via Edge headless, uploaded to Linear's file storage, and linked as a named attachment on the issue with sender and date as subtitle.
+
+`--save-attachments` additionally uploads any file attachments from the email (PDFs, Word docs, etc.) as separate Linear attachments on the same issue. Use this when the email attachment is the primary content.
 
 ### `flag`
 Flag an email for follow-up.
@@ -100,6 +103,13 @@ Mark an email as read.
 outlook-cli mark-read <message_id>
 ```
 
+### `cleanup`
+Scan the inbox for stale `FlagStatus=2` items (emails previously marked complete via old CLI versions) and clear them, removing them from Outlook's To-Do view.
+
+```
+outlook-cli cleanup
+```
+
 ### `folders`
 List all Outlook folders and item counts across all mail stores.
 
@@ -111,7 +121,7 @@ outlook-cli folders
 
 ## For AI Assistants
 
-All commands output JSON. Use PowerShell for any command that opens an individual email (`read`, `attach`, `mark-read`, `flag`, `complete-flag`, `unflag`, `flagged`).
+All commands output JSON. Use PowerShell for any command that opens an individual email (`read`, `attach`, `mark-read`, `flag`, `unflag`, `flagged`).
 
 ### Reviewing flagged emails (recommended)
 
@@ -130,6 +140,7 @@ $emails[0].body
 To attach one to a Linear issue:
 ```powershell
 outlook-cli attach $emails[0].message_id ONT-15
+outlook-cli attach $emails[0].message_id ONT-15 --save-attachments  # also uploads file attachments
 ```
 
 ### General workflow
@@ -153,15 +164,18 @@ Same fields as list, plus `body` (plain text).
 **3. Attach to a Linear issue**
 ```powershell
 outlook-cli attach <message_id> <issue_id>
+outlook-cli attach <message_id> <issue_id> --save-attachments
 ```
 `issue_id` is a Linear identifier like `ONT-15`. Returns:
 ```json
 {
   "status": "attached",
   "url": "https://uploads.linear.app/...",
-  "attachment": { "id": "...", "title": "Email: ...", "url": "..." }
+  "attachment": { "id": "...", "title": "Email: ...", "url": "..." },
+  "file_attachments": ["manuscript.docx"]
 }
 ```
+`file_attachments` lists any email file attachments uploaded (empty list if `--save-attachments` not used or email has none).
 
 ### Notes
 - `message_id` is the RFC 2822 Message-ID — stable across sessions and process boundaries
