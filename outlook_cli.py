@@ -543,14 +543,24 @@ def attach(message_id, issue_id, mark_read, save_attachments):
 
 
 @cli.command("mark-read")
-@click.argument("message_id")
-def mark_read_cmd(message_id):
-    """Mark an email as read by message_id."""
+@click.argument("message_ids", nargs=-1, required=True)
+def mark_read_cmd(message_ids):
+    """Mark one or more emails as read. Accepts multiple message_ids in one COM session."""
     mapi = get_mapi()
-    msg = _get_item(mapi, message_id)
-    msg.UnRead = False
-    msg.Save()
-    print(json.dumps({"status": "ok", "message_id": message_id}))
+    inbox = _find_folder(mapi, "inbox")
+    results = []
+    for mid in message_ids:
+        try:
+            flt = f'@SQL="{PR_INTERNET_MESSAGE_ID}" = \'<{mid}>\''
+            msg = inbox.Items.Restrict(flt).GetFirst()
+            if not msg:
+                msg = _get_item(mapi, mid)
+            msg.UnRead = False
+            msg.Save()
+            results.append({"status": "ok", "message_id": mid})
+        except Exception as e:
+            results.append({"status": "error", "message_id": mid, "error": str(e)})
+    print(json.dumps(results if len(results) > 1 else results[0], indent=2))
 
 
 @cli.command("flag")
@@ -575,6 +585,49 @@ def unflag_email(message_id):
     msg.PropertyAccessor.SetProperty(PR_TODO_ITEM_FLAGS, 0)
     msg.Save()
     print(json.dumps({"status": "unflagged", "message_id": message_id, "subject": msg.Subject}))
+
+
+@cli.command("linear-update")
+@click.argument("issue_id")
+@click.option("--parent", "parent_id", default=None, help="Set parent issue (e.g. ONT-4)")
+@click.option("--unparent", is_flag=True, help="Remove parent (make top-level)")
+@click.option("--description", "description", default=None, help="Set issue description")
+@click.option("--title", "title", default=None, help="Rename the issue")
+def linear_update(issue_id, parent_id, unparent, description, title):
+    """Update a Linear issue via GraphQL for fields linear-cli doesn't support.
+
+    Supports setting/clearing parent and updating description or title.
+    ISSUE_ID is a Linear identifier like ONT-40.
+    """
+    def get_uuid(identifier):
+        r = _linear_query(f'{{ issue(id: "{identifier}") {{ id }} }}')
+        return r["data"]["issue"]["id"]
+
+    target_uuid = get_uuid(issue_id)
+    input_fields = {}
+
+    if parent_id:
+        input_fields["parentId"] = get_uuid(parent_id)
+    if unparent:
+        input_fields["parentId"] = None
+    if description is not None:
+        input_fields["description"] = description
+    if title is not None:
+        input_fields["title"] = title
+
+    if not input_fields:
+        raise click.ClickException("Specify at least one field to update (--parent, --unparent, --description, --title)")
+
+    result = _linear_query("""
+        mutation($id: String!, $input: IssueUpdateInput!) {
+          issueUpdate(id: $id, input: $input) {
+            success
+            issue { id identifier title }
+          }
+        }
+    """, {"id": target_uuid, "input": input_fields})
+
+    print(json.dumps(result["data"]["issueUpdate"], indent=2))
 
 
 @cli.command("cleanup")

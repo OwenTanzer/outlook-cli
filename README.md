@@ -101,11 +101,26 @@ outlook-cli unflag <message_id>
 Use `unflag` when an email is resolved — it fully removes it from Outlook's native flagged view. Setting `FlagStatus=2` ("complete") does not remove items from Outlook's To-Do list; only clearing all flag state does.
 
 ### `mark-read`
-Mark an email as read.
+Mark one or more emails as read in a single COM session.
 
 ```
 outlook-cli mark-read <message_id>
+outlook-cli mark-read <id1> <id2> <id3> ...
 ```
+
+Accepts any number of message IDs. All are processed in one Outlook session — no per-email startup cost.
+
+### `linear-update`
+Update a Linear issue via GraphQL for fields `linear-cli` doesn't expose — set/clear parent, update description or title.
+
+```
+outlook-cli linear-update ONT-40 --parent ONT-4
+outlook-cli linear-update ONT-40 --unparent
+outlook-cli linear-update ONT-40 --description "Some description text"
+outlook-cli linear-update ONT-40 --title "New title" --parent ONT-4
+```
+
+Flags can be combined. Uses the same Linear token as `attach`.
 
 ### `cleanup`
 Scan the inbox for stale `FlagStatus=2` items (emails previously marked complete via old CLI versions) and clear them, removing them from Outlook's To-Do view.
