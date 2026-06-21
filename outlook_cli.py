@@ -186,17 +186,16 @@ def _find_folder(mapi, folder_name):
               help="Max emails to return (default: 20; unlimited when filtering)")
 @click.option("--unread-only", is_flag=True, help="Only show unread emails")
 @click.option("--flagged", is_flag=True, help="Only show actively flagged emails")
-@click.option("--flag-complete", is_flag=True, help="Only show flag-completed emails")
 @click.option("--folder", default="inbox", show_default=True,
               help="Folder: inbox, sent, drafts, deleted, outbox, junk")
-def list_emails(count, unread_only, flagged, flag_complete, folder):
+def list_emails(count, unread_only, flagged, folder):
     """List recent emails as JSON, newest-first.
 
-    Filtering options (--flagged, --flag-complete, --unread-only) return all
-    matches by default. Use --count to cap results.
+    Filtering options (--flagged, --unread-only) return all matches by default.
+    Use --count to cap results.
     """
     mapi = get_mapi()
-    is_filtered = unread_only or flagged or flag_complete
+    is_filtered = unread_only or flagged
     limit = count if count is not None else (None if is_filtered else 20)
 
     folder_obj = _find_folder(mapi, folder)
@@ -222,7 +221,7 @@ def list_emails(count, unread_only, flagged, flag_complete, folder):
             except Exception:
                 pass
             msg = items.GetNext()
-    elif flagged and not unread_only and not flag_complete:
+    elif flagged and not unread_only:
         # DASL Restrict fast path for --flagged: server-side filter on PR_TODO_ITEM_FLAGS.
         # Verified via verify_dasl_flagged.py: 29/29 correct, 0 misses, ~0.5s vs ~54s scan.
         # Falls back to full scan if Restrict raises.
@@ -249,7 +248,7 @@ def list_emails(count, unread_only, flagged, flag_complete, folder):
                 try:
                     if getattr(msg, "Class", None) != 43:
                         continue
-                    if _flag_status(msg) != "flagged":
+                    if not _todo_flagged(msg):
                         continue
                     collected.append(mail_to_dict(msg))
                 except Exception:
@@ -259,8 +258,8 @@ def list_emails(count, unread_only, flagged, flag_complete, folder):
         if limit is not None:
             collected = collected[:limit]
     else:
-        # Remaining filtered paths (--unread-only, --flag-complete, combinations):
-        # must scan everything. Do NOT call items.Sort() — causes COM enumerator to skip items.
+        # --unread-only or combined filters: must scan everything.
+        # Do NOT call items.Sort() — causes COM enumerator to skip items.
         for msg in items:
             scanned += 1
             try:
@@ -268,10 +267,7 @@ def list_emails(count, unread_only, flagged, flag_complete, folder):
                     continue
                 if unread_only and not msg.UnRead:
                     continue
-                fs = _flag_status(msg)
-                if flagged and fs != "flagged":
-                    continue
-                if flag_complete and fs != "complete":
+                if flagged and not _todo_flagged(msg):
                     continue
                 collected.append(mail_to_dict(msg))
             except Exception:
@@ -289,14 +285,13 @@ def list_emails(count, unread_only, flagged, flag_complete, folder):
 
 
 @cli.command("flagged")
-@click.option("--include-complete", is_flag=True, help="Also include flag-completed emails")
 @click.option("--preview", default=500, show_default=True,
               help="Body preview length in characters (0 for full body)")
-def show_flagged(include_complete, preview):
-    """Show all flagged emails with body previews in a single pass.
+def show_flagged(preview):
+    """Show all actively flagged emails with body previews in a single pass.
 
     Returns everything needed for review — no separate 'read' calls required.
-    Detects both classic Outlook flags and M365 To-Do flags.
+    Use 'unflag' to dismiss an email from Outlook's flagged view when done.
     """
     mapi = get_mapi()
     folder = _find_folder(mapi, "inbox")
@@ -305,46 +300,34 @@ def show_flagged(include_complete, preview):
 
     results = []
     scanned = 0
-    used_restrict = False
 
-    if not include_complete:
-        # DASL Restrict fast path: server-side filter on PR_TODO_ITEM_FLAGS.
-        # Verified via verify_dasl_flagged.py: 29/29 correct, 0 misses.
-        # --include-complete skips this path since completed flags have PR_TODO=0
-        # and require a separate FlagStatus=2 check via full scan.
-        _dbg("flagged: trying DASL Restrict fast path")
-        try:
-            restricted = items.Restrict(f'@SQL="{PR_TODO_ITEM_FLAGS}" = 1')
-            msg = restricted.GetFirst()
-            while msg:
-                scanned += 1
-                try:
-                    if getattr(msg, "Class", None) == 43:
-                        data = mail_to_dict(msg, include_body=True)
-                        if preview > 0 and data.get("body"):
-                            data["body"] = data["body"][:preview]
-                        results.append(data)
-                except Exception:
-                    pass
-                msg = restricted.GetNext()
-            used_restrict = True
-            _dbg(f"flagged: Restrict returned {scanned} items, {len(results)} matched")
-        except Exception as e:
-            _dbg(f"flagged: Restrict failed ({e}), falling back to full scan")
-
-    if not used_restrict:
-        # Full scan: used for --include-complete, or if Restrict failed.
-        # Do NOT call items.Sort() — causes COM enumerator to skip items.
-        _dbg("flagged: using full scan")
+    # DASL Restrict fast path: server-side filter on PR_TODO_ITEM_FLAGS.
+    # Verified via verify_dasl_flagged.py: 29/29 correct, 0 misses.
+    _dbg("flagged: trying DASL Restrict fast path")
+    try:
+        restricted = items.Restrict(f'@SQL="{PR_TODO_ITEM_FLAGS}" = 1')
+        msg = restricted.GetFirst()
+        while msg:
+            scanned += 1
+            try:
+                if getattr(msg, "Class", None) == 43:
+                    data = mail_to_dict(msg, include_body=True)
+                    if preview > 0 and data.get("body"):
+                        data["body"] = data["body"][:preview]
+                    results.append(data)
+            except Exception:
+                pass
+            msg = restricted.GetNext()
+        _dbg(f"flagged: Restrict returned {scanned} items, {len(results)} matched")
+    except Exception as e:
+        # Fallback: full scan. Do NOT call items.Sort() — causes COM enumerator to skip items.
+        _dbg(f"flagged: Restrict failed ({e}), falling back to full scan")
         for msg in items:
             scanned += 1
             try:
                 if getattr(msg, "Class", None) != 43:
                     continue
-                fs = _flag_status(msg)
-                if fs == "none":
-                    continue
-                if not include_complete and fs == "complete":
+                if not _todo_flagged(msg):
                     continue
                 data = mail_to_dict(msg, include_body=True)
                 if preview > 0 and data.get("body"):
@@ -352,7 +335,7 @@ def show_flagged(include_complete, preview):
                 results.append(data)
             except Exception:
                 continue
-        _dbg(f"flagged: scanned {scanned} items, {_todo_calls} PropertyAccessor calls, {len(results)} matched")
+        _dbg(f"flagged: scanned {scanned} items, {len(results)} matched")
 
     results.sort(key=lambda m: m.get("received") or "", reverse=True)
     _dbg("flagged: done")
@@ -460,28 +443,67 @@ def flag_email(message_id):
     print(json.dumps({"status": "flagged", "message_id": message_id, "subject": msg.Subject}))
 
 
-@cli.command("complete-flag")
-@click.argument("message_id")
-def complete_flag(message_id):
-    """Mark a flagged email as complete by message_id."""
-    mapi = get_mapi()
-    msg = _get_item(mapi, message_id)
-    msg.FlagStatus = 2
-    msg.PropertyAccessor.SetProperty(PR_TODO_ITEM_FLAGS, 0)
-    msg.Save()
-    print(json.dumps({"status": "complete", "message_id": message_id, "subject": msg.Subject}))
-
-
 @cli.command("unflag")
 @click.argument("message_id")
 def unflag_email(message_id):
-    """Remove the flag from an email by message_id."""
+    """Remove a flag entirely, clearing the email from Outlook's flagged/To-Do view."""
     mapi = get_mapi()
     msg = _get_item(mapi, message_id)
     msg.FlagStatus = 0
     msg.PropertyAccessor.SetProperty(PR_TODO_ITEM_FLAGS, 0)
     msg.Save()
     print(json.dumps({"status": "unflagged", "message_id": message_id, "subject": msg.Subject}))
+
+
+@cli.command("cleanup")
+def cleanup_stale_flags():
+    """Remove stale completed flags from Outlook's To-Do view in one pass.
+
+    Finds all items in the To-Do folder with FlagStatus=2 (complete) but no
+    active PR_TODO bit, and fully clears their flag state. These are emails that
+    were previously marked complete but remain visible in Outlook's flagged view
+    because FlagStatus=2 does not remove items from the To-Do list — only clearing
+    all flag state does.
+    """
+    mapi = get_mapi()
+    inbox = _find_folder(mapi, "inbox")
+    items = inbox.Items
+    _dbg(f"cleanup: scanning {items.Count} inbox items for stale FlagStatus=2")
+
+    # Pass 1: scan inbox with GetFirst/GetNext. FlagStatus is a native COM attribute
+    # (~1ms/item), so 3200 items takes ~3s. Collect refs without modifying.
+    stale = []
+    msg = items.GetFirst()
+    while msg:
+        try:
+            if getattr(msg, "Class", None) == 43 and getattr(msg, "FlagStatus", 0) == 2:
+                try:
+                    tv = msg.PropertyAccessor.GetProperty(PR_TODO_ITEM_FLAGS)
+                    todo_active = bool(tv and (tv & 1))
+                except Exception:
+                    todo_active = False
+                if not todo_active:
+                    stale.append(msg)
+        except Exception:
+            pass
+        msg = items.GetNext()
+    _dbg(f"cleanup: found {len(stale)} stale items")
+
+    # Pass 2: modify after iteration is complete — no collection mutation mid-loop.
+    cleared = []
+    for item in stale:
+        try:
+            subj = item.Subject or "(no subject)"
+            item.FlagStatus = 0
+            item.PropertyAccessor.SetProperty(PR_TODO_ITEM_FLAGS, 0)
+            item.Save()
+            cleared.append(subj)
+            _dbg(f"cleanup: cleared '{subj}'")
+        except Exception as e:
+            _dbg(f"cleanup: failed ({e})")
+
+    _dbg(f"cleanup: done, cleared {len(cleared)} items")
+    print(json.dumps({"status": "ok", "cleared": len(cleared), "subjects": cleared}, indent=2))
 
 
 @cli.command("folders")

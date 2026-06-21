@@ -38,7 +38,6 @@ Show all actively flagged emails with body previews in a single pass. No separat
 
 ```
 outlook-cli flagged
-outlook-cli flagged --include-complete
 outlook-cli flagged --preview 0        # full body
 ```
 
@@ -52,11 +51,10 @@ outlook-cli list
 outlook-cli list -n 10
 outlook-cli list --unread-only
 outlook-cli list --flagged
-outlook-cli list --flag-complete
 outlook-cli list --folder sent
 ```
 
-Without filters, returns the 20 most recent emails. With `--flagged`, `--flag-complete`, or `--unread-only`, returns all matches (use `-n` to cap). `--flagged` shows active follow-up flags only; `--flag-complete` shows completed flags.
+Without filters, returns the 20 most recent emails. With `--flagged` or `--unread-only`, returns all matches (use `-n` to cap).
 
 **Folders:** `inbox`, `sent`, `drafts`, `deleted`, `outbox`, `junk`
 
@@ -86,19 +84,14 @@ Flag an email for follow-up.
 outlook-cli flag <message_id>
 ```
 
-### `complete-flag`
-Mark a flagged email as complete.
-
-```
-outlook-cli complete-flag <message_id>
-```
-
 ### `unflag`
-Remove the flag from an email entirely.
+Clear a flag entirely, removing the email from Outlook's flagged/To-Do view.
 
 ```
 outlook-cli unflag <message_id>
 ```
+
+Use `unflag` when an email is resolved — it fully removes it from Outlook's native flagged view. Setting `FlagStatus=2` ("complete") does not remove items from Outlook's To-Do list; only clearing all flag state does.
 
 ### `mark-read`
 Mark an email as read.
