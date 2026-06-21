@@ -28,6 +28,7 @@ EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 LINEAR_API = "https://api.linear.app/graphql"
 PR_INTERNET_MESSAGE_ID = "http://schemas.microsoft.com/mapi/proptag/0x1035001F"
 PR_TODO_ITEM_FLAGS = "http://schemas.microsoft.com/mapi/proptag/0x0E2B0003"
+KEYWORDS_DASL = "urn:schemas-microsoft-com:office:office#Keywords"
 
 
 def _linear_token():
@@ -139,9 +140,10 @@ def _print_table(emails, show_body=False):
     col_att  = 1
     col_unread = 1
     col_sender = 24
-    col_subj = 52
+    col_subj = 46
+    col_cat = 16
     header = (f"{'DATE':<{col_date}}  {'':>{col_unread}} {'':>{col_flag}} {'':>{col_att}}  "
-              f"{'SENDER':<{col_sender}}  {'SUBJECT':<{col_subj}}")
+              f"{'SENDER':<{col_sender}}  {'SUBJECT':<{col_subj}}  {'CAT':<{col_cat}}")
     print(header)
     print("-" * len(header))
     for e in emails:
@@ -151,8 +153,10 @@ def _print_table(emails, show_body=False):
         att    = "@" if e.get("has_attachments") else " "
         sender = (e.get("sender") or "")[:col_sender]
         subj   = (e.get("subject") or "")[:col_subj]
+        cats   = e.get("categories") or []
+        cat    = cats[0][:col_cat] if cats else ""
         print(f"{date:<{col_date}}  {unread:>{col_unread}} {flag:>{col_flag}} {att:>{col_att}}  "
-              f"{sender:<{col_sender}}  {subj:<{col_subj}}")
+              f"{sender:<{col_sender}}  {subj:<{col_subj}}  {cat:<{col_cat}}")
         if show_body and e.get("body"):
             body = e["body"].replace("\r", "").replace("\n", " ").strip()[:120]
             print(f"{'':>{col_date + col_unread + col_flag + col_att + col_sender + 8}}{body}")
@@ -163,6 +167,7 @@ def mail_to_dict(msg, index=None, include_body=False):
         received = msg.ReceivedTime.isoformat()
     except Exception:
         received = None
+    cats_raw = getattr(msg, "Categories", "") or ""
     d = {
         "index": index,
         "message_id": _internet_message_id(msg),
@@ -174,6 +179,7 @@ def mail_to_dict(msg, index=None, include_body=False):
         "flag_status": _flag_status(msg),
         "has_attachments": bool(msg.Attachments.Count),
         "size_bytes": msg.Size,
+        "categories": [c.strip() for c in cats_raw.split(",") if c.strip()],
     }
     if include_body:
         d["body"] = msg.Body
@@ -213,18 +219,19 @@ def _find_folder(mapi, folder_name):
               help="Max emails to return (default: 20; unlimited when filtering)")
 @click.option("--unread-only", is_flag=True, help="Only show unread emails")
 @click.option("--flagged", is_flag=True, help="Only show actively flagged emails")
+@click.option("--category", default=None, help="Filter by Outlook category name")
 @click.option("--folder", default="inbox", show_default=True,
               help="Folder: inbox, sent, drafts, deleted, outbox, junk")
 @click.option("--format", "fmt", default="table", type=click.Choice(["json", "table"]),
               help="Output format: table (default) or json")
-def list_emails(count, unread_only, flagged, folder, fmt):
-    """List recent emails as JSON, newest-first.
+def list_emails(count, unread_only, flagged, category, folder, fmt):
+    """List recent emails, newest-first.
 
-    Filtering options (--flagged, --unread-only) return all matches by default.
-    Use --count to cap results.
+    Filtering options (--flagged, --unread-only, --category) return all matches by default.
+    Use --count to cap results. Multiple filters are ANDed together.
     """
     mapi = get_mapi()
-    is_filtered = unread_only or flagged
+    is_filtered = unread_only or flagged or bool(category)
     limit = count if count is not None else (None if is_filtered else 20)
 
     folder_obj = _find_folder(mapi, folder)
@@ -250,50 +257,24 @@ def list_emails(count, unread_only, flagged, folder, fmt):
             except Exception:
                 pass
             msg = items.GetNext()
-    elif flagged and not unread_only:
-        # DASL Restrict fast path for --flagged: server-side filter on PR_TODO_ITEM_FLAGS.
-        # Verified via verify_dasl_flagged.py: 29/29 correct, 0 misses, ~0.5s vs ~54s scan.
-        # Falls back to full scan if Restrict raises.
-        _dbg("list: using DASL Restrict fast path for --flagged")
+    else:
+        # Filtered path: compose DASL AND query from whichever filters are active.
+        # All combinations reduce to a server-side Restrict — no full-scan needed in fast path.
+        # msg.Categories is a native COM attribute (~1ms), not a PropertyAccessor call (~16ms),
+        # so category checks in the fallback scan are cheap.
+        dasl_parts = []
+        if unread_only:
+            dasl_parts.append('"urn:schemas:httpmail:read" = 0')
+        if flagged:
+            dasl_parts.append(f'"{PR_TODO_ITEM_FLAGS}" = 1')
+        if category:
+            dasl_parts.append(f'"{KEYWORDS_DASL}" = \'{category}\'')
+        dasl_filter = "@SQL=" + " AND ".join(dasl_parts)
+        _dbg(f"list: DASL filter: {dasl_filter}")
+
         restrict_ok = False
         try:
-            restricted = items.Restrict(f'@SQL="{PR_TODO_ITEM_FLAGS}" = 1')
-            msg = restricted.GetFirst()
-            while msg:
-                scanned += 1
-                try:
-                    if getattr(msg, "Class", None) == 43:
-                        collected.append(mail_to_dict(msg))
-                except Exception:
-                    pass
-                msg = restricted.GetNext()
-            restrict_ok = True
-        except Exception as e:
-            _dbg(f"list: Restrict failed ({e}), falling back to full scan")
-
-        if not restrict_ok:
-            for msg in items:
-                scanned += 1
-                try:
-                    if getattr(msg, "Class", None) != 43:
-                        continue
-                    if not _todo_flagged(msg):
-                        continue
-                    collected.append(mail_to_dict(msg))
-                except Exception:
-                    continue
-
-        collected.sort(key=lambda m: m.get("received") or "", reverse=True)
-        if limit is not None:
-            collected = collected[:limit]
-    elif unread_only and not flagged:
-        # DASL Restrict + Sort + early stop: same pattern as the unfiltered fast path.
-        # Restrict server-side to unread, sort newest-first, then stop at limit —
-        # avoids PropertyAccessor calls on the full unread backlog.
-        _dbg("list: using DASL Restrict + Sort fast path for --unread-only")
-        restrict_ok = False
-        try:
-            restricted = items.Restrict('@SQL="urn:schemas:httpmail:read" = 0')
+            restricted = items.Restrict(dasl_filter)
             restricted.Sort("[ReceivedTime]", True)
             msg = restricted.GetFirst()
             target = limit if limit is not None else 2 ** 31
@@ -310,37 +291,27 @@ def list_emails(count, unread_only, flagged, folder, fmt):
             _dbg(f"list: Restrict failed ({e}), falling back to full scan")
 
         if not restrict_ok:
+            # Fallback: full scan. Do NOT call items.Sort() before the for-loop —
+            # Sort causes COM enumerator to skip items on sorted collections.
             for msg in items:
                 scanned += 1
                 try:
                     if getattr(msg, "Class", None) != 43:
                         continue
-                    if not msg.UnRead:
+                    if unread_only and not msg.UnRead:
                         continue
+                    if flagged and not _todo_flagged(msg):
+                        continue
+                    if category:
+                        cats = [c.strip().lower() for c in (getattr(msg, "Categories", "") or "").split(",") if c.strip()]
+                        if category.lower() not in cats:
+                            continue
                     collected.append(mail_to_dict(msg))
                 except Exception:
                     continue
             collected.sort(key=lambda m: m.get("received") or "", reverse=True)
             if limit is not None:
                 collected = collected[:limit]
-    else:
-        # Combined filters (--unread-only --flagged): full scan required.
-        # Do NOT call items.Sort() — causes COM enumerator to skip items.
-        for msg in items:
-            scanned += 1
-            try:
-                if getattr(msg, "Class", None) != 43:
-                    continue
-                if unread_only and not msg.UnRead:
-                    continue
-                if flagged and not _todo_flagged(msg):
-                    continue
-                collected.append(mail_to_dict(msg))
-            except Exception:
-                continue
-        collected.sort(key=lambda m: m.get("received") or "", reverse=True)
-        if limit is not None:
-            collected = collected[:limit]
 
     _dbg(f"list: scanned {scanned} items, {_todo_calls} PropertyAccessor calls, {len(collected)} matched")
     for idx, m in enumerate(collected):
@@ -585,6 +556,36 @@ def unflag_email(message_id):
     msg.PropertyAccessor.SetProperty(PR_TODO_ITEM_FLAGS, 0)
     msg.Save()
     print(json.dumps({"status": "unflagged", "message_id": message_id, "subject": msg.Subject}))
+
+
+@cli.command("categorize")
+@click.argument("message_id")
+@click.argument("category")
+@click.option("--remove", is_flag=True, help="Remove this category instead of adding it")
+def categorize_email(message_id, category, remove):
+    """Add or remove an Outlook category on an email by message_id.
+
+    Categories are visible in 'list' output and can be used as a filter with
+    'list --category <name>'. Use them to tag emails worth keeping before
+    bulk-deleting uncategorized clutter.
+    """
+    mapi = get_mapi()
+    msg = _get_item(mapi, message_id)
+    existing = [c.strip() for c in (getattr(msg, "Categories", "") or "").split(",") if c.strip()]
+    if remove:
+        updated = [c for c in existing if c.lower() != category.lower()]
+    else:
+        if not any(c.lower() == category.lower() for c in existing):
+            existing.append(category)
+        updated = existing
+    msg.Categories = ", ".join(updated)
+    msg.Save()
+    print(json.dumps({
+        "status": "ok",
+        "message_id": message_id,
+        "subject": msg.Subject,
+        "categories": updated,
+    }, indent=2))
 
 
 @cli.command("linear-update")
