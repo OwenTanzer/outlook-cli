@@ -286,8 +286,42 @@ def list_emails(count, unread_only, flagged, folder, fmt):
         collected.sort(key=lambda m: m.get("received") or "", reverse=True)
         if limit is not None:
             collected = collected[:limit]
+    elif unread_only and not flagged:
+        # DASL Restrict fast path for --unread-only: server-side filter on read state.
+        _dbg("list: using DASL Restrict fast path for --unread-only")
+        restrict_ok = False
+        try:
+            restricted = items.Restrict('@SQL="urn:schemas:httpmail:read" = 0')
+            msg = restricted.GetFirst()
+            while msg:
+                scanned += 1
+                try:
+                    if getattr(msg, "Class", None) == 43:
+                        collected.append(mail_to_dict(msg))
+                except Exception:
+                    pass
+                msg = restricted.GetNext()
+            restrict_ok = True
+        except Exception as e:
+            _dbg(f"list: Restrict failed ({e}), falling back to full scan")
+
+        if not restrict_ok:
+            for msg in items:
+                scanned += 1
+                try:
+                    if getattr(msg, "Class", None) != 43:
+                        continue
+                    if not msg.UnRead:
+                        continue
+                    collected.append(mail_to_dict(msg))
+                except Exception:
+                    continue
+
+        collected.sort(key=lambda m: m.get("received") or "", reverse=True)
+        if limit is not None:
+            collected = collected[:limit]
     else:
-        # --unread-only or combined filters: must scan everything.
+        # Combined filters (--unread-only --flagged): full scan required.
         # Do NOT call items.Sort() — causes COM enumerator to skip items.
         for msg in items:
             scanned += 1
