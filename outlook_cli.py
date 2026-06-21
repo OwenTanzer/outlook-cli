@@ -7,11 +7,20 @@ import subprocess
 import tempfile
 import os
 import tomllib
+import time
 from pathlib import Path
 
 import click
 import requests
 import win32com.client
+
+_debug = False
+_t0 = time.perf_counter()
+
+def _dbg(msg):
+    if _debug:
+        elapsed = time.perf_counter() - _t0
+        print(f"[{elapsed:.3f}s] {msg}", file=sys.stderr)
 
 LINEAR_CLI = str(Path.home() / ".cargo" / "bin" / "linear-cli.exe")
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
@@ -40,8 +49,12 @@ def _linear_query(query, variables=None):
 
 
 def get_mapi():
+    _dbg("COM dispatch start")
     outlook = win32com.client.Dispatch("Outlook.Application")
-    return outlook.GetNamespace("MAPI")
+    _dbg("COM dispatch done")
+    mapi = outlook.GetNamespace("MAPI")
+    _dbg("MAPI namespace acquired")
+    return mapi
 
 
 def _internet_message_id(msg):
@@ -52,8 +65,12 @@ def _internet_message_id(msg):
         return None
 
 
+_todo_calls = 0
+
 def _todo_flagged(msg):
     """Return True if item is flagged via the M365 To-Do system (PR_TODO_ITEM_FLAGS bit 0)."""
+    global _todo_calls
+    _todo_calls += 1
     try:
         flags = msg.PropertyAccessor.GetProperty(PR_TODO_ITEM_FLAGS)
         return bool(flags and (flags & 1))
@@ -81,17 +98,22 @@ def _flag_status(msg):
 
 def _get_item(mapi, message_id):
     """Find a mail item by InternetMessageId — stable across sessions."""
+    _dbg("_get_item scan start")
+    scanned = 0
     for store in mapi.Folders:
         for folder in store.Folders:
             try:
                 for item in folder.Items:
+                    scanned += 1
                     try:
                         if _internet_message_id(item) == message_id:
+                            _dbg(f"_get_item found after {scanned} items")
                             return item
                     except Exception:
                         pass
             except Exception:
                 pass
+    _dbg(f"_get_item exhausted {scanned} items — not found")
     raise click.ClickException(f"Email not found: {message_id}")
 
 
@@ -118,12 +140,15 @@ def mail_to_dict(msg, index=None, include_body=False):
 
 
 @click.group()
-def cli():
+@click.option("--debug", is_flag=True, help="Print timing info to stderr")
+def cli(debug):
     """Outlook CLI — COM-based command-line access to Outlook on Windows."""
-    pass
+    global _debug
+    _debug = debug
 
 
 def _find_folder(mapi, folder_name):
+    _dbg(f"_find_folder: {folder_name}")
     target = folder_name.lower().replace(" ", "")
     aliases = {
         "inbox": ["inbox"],
@@ -137,6 +162,7 @@ def _find_folder(mapi, folder_name):
     for store in mapi.Folders:
         for sub in store.Folders:
             if sub.Name.lower().replace(" ", "") in candidates:
+                _dbg(f"_find_folder: found '{sub.Name}' in store '{store.Name}'")
                 return sub
     return mapi.GetDefaultFolder(6)
 
@@ -161,31 +187,54 @@ def list_emails(count, unread_only, flagged, flag_complete, folder):
 
     folder_obj = _find_folder(mapi, folder)
     items = folder_obj.Items
-    # Do NOT call items.Sort() — it causes COM iterator to silently skip items.
-    # Collect everything, sort in Python instead.
+    _dbg(f"list: folder has {items.Count} items, limit={limit}, filtered={is_filtered}")
 
     collected = []
-    for msg in items:
-        try:
-            if getattr(msg, "Class", None) != 43:
-                continue
-            if unread_only and not msg.UnRead:
-                continue
-            fs = _flag_status(msg)
-            if flagged and fs != "flagged":
-                continue
-            if flag_complete and fs != "complete":
-                continue
-            collected.append(mail_to_dict(msg))
-        except Exception:
-            continue
+    scanned = 0
 
-    collected.sort(key=lambda m: m.get("received") or "", reverse=True)
-    if limit is not None:
-        collected = collected[:limit]
+    if not is_filtered and limit is not None:
+        # Fast path: Sort() + GetFirst/GetNext — stops at limit without scanning everything.
+        # GetFirst/GetNext uses COM's own cursor and is documented to work correctly with
+        # Sort(), unlike Python's for-loop enumerator which skips items on sorted collections.
+        # Verified against scan-all-sort-in-Python via verify_sort.py before enabling.
+        _dbg("list: using Sort()+GetFirst/GetNext fast path")
+        items.Sort("[ReceivedTime]", True)
+        msg = items.GetFirst()
+        while msg and len(collected) < limit:
+            scanned += 1
+            try:
+                if getattr(msg, "Class", None) == 43:
+                    collected.append(mail_to_dict(msg))
+            except Exception:
+                pass
+            msg = items.GetNext()
+    else:
+        # Filtered path or unlimited: must scan everything.
+        # Do NOT call items.Sort() here — causes COM enumerator to skip items.
+        for msg in items:
+            scanned += 1
+            try:
+                if getattr(msg, "Class", None) != 43:
+                    continue
+                if unread_only and not msg.UnRead:
+                    continue
+                fs = _flag_status(msg)
+                if flagged and fs != "flagged":
+                    continue
+                if flag_complete and fs != "complete":
+                    continue
+                collected.append(mail_to_dict(msg))
+            except Exception:
+                continue
+        collected.sort(key=lambda m: m.get("received") or "", reverse=True)
+        if limit is not None:
+            collected = collected[:limit]
+
+    _dbg(f"list: scanned {scanned} items, {_todo_calls} PropertyAccessor calls, {len(collected)} matched")
     for idx, m in enumerate(collected):
         m["index"] = idx
 
+    _dbg(f"list: done, returning {len(collected)} results")
     print(json.dumps(collected, indent=2, default=str))
 
 
@@ -202,10 +251,13 @@ def show_flagged(include_complete, preview):
     mapi = get_mapi()
     folder = _find_folder(mapi, "inbox")
     items = folder.Items
+    _dbg(f"flagged: folder has {items.Count} items")
     # Do NOT call items.Sort() — it causes COM iterator to silently skip items.
 
     results = []
+    scanned = 0
     for msg in items:
+        scanned += 1
         try:
             if getattr(msg, "Class", None) != 43:
                 continue
@@ -221,7 +273,9 @@ def show_flagged(include_complete, preview):
         except Exception:
             continue
 
+    _dbg(f"flagged: scanned {scanned} items, {_todo_calls} PropertyAccessor calls, {len(results)} matched")
     results.sort(key=lambda m: m.get("received") or "", reverse=True)
+    _dbg("flagged: done")
     print(json.dumps(results, indent=2, default=str))
 
 
