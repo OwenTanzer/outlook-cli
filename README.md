@@ -1,6 +1,6 @@
-# outlook-cli
+# ont-cli
 
-COM-based command-line access to Outlook on Windows. Read emails, inspect threads, and attach them as PDFs to Linear issues — from the terminal or an AI agent.
+Outlook + Linear workflow automation CLI. Read emails, attach them as PDFs to Linear issues, update Linear issues via GraphQL — from the terminal or an AI agent.
 
 ## Requirements
 
@@ -16,20 +16,20 @@ pip install pywin32 click requests
 
 Add launchers to a directory on your PATH (e.g. `~/.local/bin`):
 
-**PowerShell / cmd** (`outlook-cli.cmd`):
+**PowerShell / cmd** (`ont-cli.cmd`):
 ```bat
 @echo off
-python "C:\path\to\outlook_cli.py" %*
+python "C:\path\to\ont_cli.py" %*
 ```
 
-**Bash / Git Bash** (`outlook-cli`, no extension):
+**Bash / Git Bash** (`ont-cli`, no extension):
 ```sh
 #!/bin/sh
-python "C:/path/to/outlook_cli.py" "$@"
+python "C:/path/to/ont_cli.py" "$@"
 ```
-Then `chmod +x ~/.local/bin/outlook-cli`.
+Then `chmod +x ~/.local/bin/ont-cli`.
 
-> **Note:** Use PowerShell for any command that operates on an individual email (`read`, `attach`, `mark-read`, `flag`, `unflag`, `flagged`). These open items via COM, which fails in Git Bash due to apartment model differences. `list`, `cleanup`, and `folders` work from either shell.
+> **Note:** Use PowerShell for any command that operates on an individual email (`read`, `attach`, `mark-read`, `flag`, `unflag`, `flagged`). These open items via COM, which fails in Git Bash due to apartment model differences. `list`, `cleanup`, `linear-update`, and `folders` work from either shell.
 
 ## Commands
 
@@ -37,9 +37,9 @@ Then `chmod +x ~/.local/bin/outlook-cli`.
 Show all actively flagged emails with body previews in a single pass. No separate `read` calls needed.
 
 ```
-outlook-cli flagged
-outlook-cli flagged --preview 0        # full body
-outlook-cli flagged --format table     # human-readable view with body snippet
+ont-cli flagged
+ont-cli flagged --preview 0        # full body
+ont-cli flagged --format table     # human-readable view with body snippet
 ```
 
 Returns newest-first. Body is truncated to 500 characters by default; `--preview 0` returns the full body. `--format table` (default) prints a columnar view with a 120-character body snippet per email. Use `--format json` for machine-readable output.
@@ -48,19 +48,19 @@ Returns newest-first. Body is truncated to 500 characters by default; `--preview
 List recent emails from your inbox, ordered newest-first.
 
 ```
-outlook-cli list
-outlook-cli list -n 10
-outlook-cli list --unread-only
-outlook-cli list --flagged
-outlook-cli list --folder sent
-outlook-cli list --unread-only --format table
+ont-cli list
+ont-cli list -n 10
+ont-cli list --unread-only
+ont-cli list --flagged
+ont-cli list --folder sent
+ont-cli list --unread-only --format table
 ```
 
 Without filters, returns the 20 most recent emails. With `--flagged` or `--unread-only`, returns all matches (use `-n` to cap).
 
 **Folders:** `inbox`, `sent`, `drafts`, `deleted`, `outbox`, `junk`
 
-`--format table` prints a human-readable columnar view (default). Columns: date, unread (•), flagged (F), has-attachment (@), sender, subject. Use `--format json` for machine-readable output.
+`--format table` prints a human-readable columnar view (default). Columns: date, unread (*), flagged (F), has-attachment (@), sender, subject. Use `--format json` for machine-readable output.
 
 Each JSON result includes a `message_id` field — use this for all per-email commands.
 
@@ -68,16 +68,16 @@ Each JSON result includes a `message_id` field — use this for all per-email co
 Read the full body of an email by its `message_id`.
 
 ```
-outlook-cli read <message_id>
+ont-cli read <message_id>
 ```
 
 ### `attach`
 Convert an email to PDF and attach it to an existing Linear issue.
 
 ```
-outlook-cli attach <message_id> <issue_id>
-outlook-cli attach <message_id> ONT-15 --mark-read
-outlook-cli attach <message_id> ONT-15 --save-attachments
+ont-cli attach <message_id> <issue_id>
+ont-cli attach <message_id> ONT-15 --mark-read
+ont-cli attach <message_id> ONT-15 --save-attachments
 ```
 
 The PDF is generated via Edge headless, uploaded to Linear's file storage, and linked as a named attachment on the issue with sender and date as subtitle.
@@ -88,14 +88,14 @@ The PDF is generated via Edge headless, uploaded to Linear's file storage, and l
 Flag an email for follow-up.
 
 ```
-outlook-cli flag <message_id>
+ont-cli flag <message_id>
 ```
 
 ### `unflag`
 Clear a flag entirely, removing the email from Outlook's flagged/To-Do view.
 
 ```
-outlook-cli unflag <message_id>
+ont-cli unflag <message_id>
 ```
 
 Use `unflag` when an email is resolved — it fully removes it from Outlook's native flagged view. Setting `FlagStatus=2` ("complete") does not remove items from Outlook's To-Do list; only clearing all flag state does.
@@ -104,8 +104,8 @@ Use `unflag` when an email is resolved — it fully removes it from Outlook's na
 Mark one or more emails as read in a single COM session.
 
 ```
-outlook-cli mark-read <message_id>
-outlook-cli mark-read <id1> <id2> <id3> ...
+ont-cli mark-read <message_id>
+ont-cli mark-read <id1> <id2> <id3> ...
 ```
 
 Accepts any number of message IDs. All are processed in one Outlook session — no per-email startup cost.
@@ -114,10 +114,10 @@ Accepts any number of message IDs. All are processed in one Outlook session — 
 Update a Linear issue via GraphQL for fields `linear-cli` doesn't expose — set/clear parent, update description or title.
 
 ```
-outlook-cli linear-update ONT-40 --parent ONT-4
-outlook-cli linear-update ONT-40 --unparent
-outlook-cli linear-update ONT-40 --description "Some description text"
-outlook-cli linear-update ONT-40 --title "New title" --parent ONT-4
+ont-cli linear-update ONT-40 --parent ONT-4
+ont-cli linear-update ONT-40 --unparent
+ont-cli linear-update ONT-40 --description "Some description text"
+ont-cli linear-update ONT-40 --title "New title" --parent ONT-4
 ```
 
 Flags can be combined. Uses the same Linear token as `attach`.
@@ -126,14 +126,14 @@ Flags can be combined. Uses the same Linear token as `attach`.
 Scan the inbox for stale `FlagStatus=2` items (emails previously marked complete via old CLI versions) and clear them, removing them from Outlook's To-Do view.
 
 ```
-outlook-cli cleanup
+ont-cli cleanup
 ```
 
 ### `folders`
 List all Outlook folders and item counts across all mail stores.
 
 ```
-outlook-cli folders
+ont-cli folders
 ```
 
 ---
@@ -147,7 +147,7 @@ All commands output JSON. Use PowerShell for any command that opens an individua
 Use the `flagged` compound command — it returns everything in one COM session with no chaining:
 
 ```powershell
-$emails = outlook-cli flagged | ConvertFrom-Json
+$emails = ont-cli flagged --format json | ConvertFrom-Json
 $emails | ForEach-Object { "$($_.received.Substring(0,10)) | $($_.subject)" }
 ```
 
@@ -158,15 +158,15 @@ $emails[0].body
 
 To attach one to a Linear issue:
 ```powershell
-outlook-cli attach $emails[0].message_id ONT-15
-outlook-cli attach $emails[0].message_id ONT-15 --save-attachments  # also uploads file attachments
+ont-cli attach $emails[0].message_id ONT-15
+ont-cli attach $emails[0].message_id ONT-15 --save-attachments  # also uploads file attachments
 ```
 
 ### General workflow
 
 **1. List emails**
 ```
-outlook-cli list -n 20
+ont-cli list -n 20
 ```
 Each item includes:
 - `message_id` — stable RFC Message-ID, use for all subsequent commands
@@ -176,14 +176,14 @@ Each item includes:
 
 **2. Read an email**
 ```powershell
-outlook-cli read <message_id>
+ont-cli read <message_id>
 ```
 Same fields as list, plus `body` (plain text).
 
 **3. Attach to a Linear issue**
 ```powershell
-outlook-cli attach <message_id> <issue_id>
-outlook-cli attach <message_id> <issue_id> --save-attachments
+ont-cli attach <message_id> <issue_id>
+ont-cli attach <message_id> <issue_id> --save-attachments
 ```
 `issue_id` is a Linear identifier like `ONT-15`. Returns:
 ```json
@@ -195,6 +195,12 @@ outlook-cli attach <message_id> <issue_id> --save-attachments
 }
 ```
 `file_attachments` lists any email file attachments uploaded (empty list if `--save-attachments` not used or email has none).
+
+**4. Update a Linear issue**
+```powershell
+ont-cli linear-update ONT-40 --parent ONT-4
+ont-cli linear-update ONT-40 --description "Details here"
+```
 
 ### Notes
 - `message_id` is the RFC 2822 Message-ID — stable across sessions and process boundaries

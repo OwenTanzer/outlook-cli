@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Outlook CLI — COM-based command-line access to Outlook on Windows."""
+"""ont-cli — Outlook + Linear workflow automation CLI."""
 
 import sys
 import json
@@ -183,7 +183,7 @@ def mail_to_dict(msg, index=None, include_body=False):
 @click.group()
 @click.option("--debug", is_flag=True, help="Print timing info to stderr")
 def cli(debug):
-    """Outlook CLI — COM-based command-line access to Outlook on Windows."""
+    """ont-cli — Outlook + Linear workflow automation CLI."""
     global _debug
     _debug = debug
 
