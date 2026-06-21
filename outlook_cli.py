@@ -222,9 +222,45 @@ def list_emails(count, unread_only, flagged, flag_complete, folder):
             except Exception:
                 pass
             msg = items.GetNext()
+    elif flagged and not unread_only and not flag_complete:
+        # DASL Restrict fast path for --flagged: server-side filter on PR_TODO_ITEM_FLAGS.
+        # Verified via verify_dasl_flagged.py: 29/29 correct, 0 misses, ~0.5s vs ~54s scan.
+        # Falls back to full scan if Restrict raises.
+        _dbg("list: using DASL Restrict fast path for --flagged")
+        restrict_ok = False
+        try:
+            restricted = items.Restrict(f'@SQL="{PR_TODO_ITEM_FLAGS}" = 1')
+            msg = restricted.GetFirst()
+            while msg:
+                scanned += 1
+                try:
+                    if getattr(msg, "Class", None) == 43:
+                        collected.append(mail_to_dict(msg))
+                except Exception:
+                    pass
+                msg = restricted.GetNext()
+            restrict_ok = True
+        except Exception as e:
+            _dbg(f"list: Restrict failed ({e}), falling back to full scan")
+
+        if not restrict_ok:
+            for msg in items:
+                scanned += 1
+                try:
+                    if getattr(msg, "Class", None) != 43:
+                        continue
+                    if _flag_status(msg) != "flagged":
+                        continue
+                    collected.append(mail_to_dict(msg))
+                except Exception:
+                    continue
+
+        collected.sort(key=lambda m: m.get("received") or "", reverse=True)
+        if limit is not None:
+            collected = collected[:limit]
     else:
-        # Filtered path or unlimited: must scan everything.
-        # Do NOT call items.Sort() here — causes COM enumerator to skip items.
+        # Remaining filtered paths (--unread-only, --flag-complete, combinations):
+        # must scan everything. Do NOT call items.Sort() — causes COM enumerator to skip items.
         for msg in items:
             scanned += 1
             try:
@@ -266,28 +302,58 @@ def show_flagged(include_complete, preview):
     folder = _find_folder(mapi, "inbox")
     items = folder.Items
     _dbg(f"flagged: folder has {items.Count} items")
-    # Do NOT call items.Sort() — it causes COM iterator to silently skip items.
 
     results = []
     scanned = 0
-    for msg in items:
-        scanned += 1
-        try:
-            if getattr(msg, "Class", None) != 43:
-                continue
-            fs = _flag_status(msg)
-            if fs == "none":
-                continue
-            if not include_complete and fs == "complete":
-                continue
-            data = mail_to_dict(msg, include_body=True)
-            if preview > 0 and data.get("body"):
-                data["body"] = data["body"][:preview]
-            results.append(data)
-        except Exception:
-            continue
+    used_restrict = False
 
-    _dbg(f"flagged: scanned {scanned} items, {_todo_calls} PropertyAccessor calls, {len(results)} matched")
+    if not include_complete:
+        # DASL Restrict fast path: server-side filter on PR_TODO_ITEM_FLAGS.
+        # Verified via verify_dasl_flagged.py: 29/29 correct, 0 misses.
+        # --include-complete skips this path since completed flags have PR_TODO=0
+        # and require a separate FlagStatus=2 check via full scan.
+        _dbg("flagged: trying DASL Restrict fast path")
+        try:
+            restricted = items.Restrict(f'@SQL="{PR_TODO_ITEM_FLAGS}" = 1')
+            msg = restricted.GetFirst()
+            while msg:
+                scanned += 1
+                try:
+                    if getattr(msg, "Class", None) == 43:
+                        data = mail_to_dict(msg, include_body=True)
+                        if preview > 0 and data.get("body"):
+                            data["body"] = data["body"][:preview]
+                        results.append(data)
+                except Exception:
+                    pass
+                msg = restricted.GetNext()
+            used_restrict = True
+            _dbg(f"flagged: Restrict returned {scanned} items, {len(results)} matched")
+        except Exception as e:
+            _dbg(f"flagged: Restrict failed ({e}), falling back to full scan")
+
+    if not used_restrict:
+        # Full scan: used for --include-complete, or if Restrict failed.
+        # Do NOT call items.Sort() — causes COM enumerator to skip items.
+        _dbg("flagged: using full scan")
+        for msg in items:
+            scanned += 1
+            try:
+                if getattr(msg, "Class", None) != 43:
+                    continue
+                fs = _flag_status(msg)
+                if fs == "none":
+                    continue
+                if not include_complete and fs == "complete":
+                    continue
+                data = mail_to_dict(msg, include_body=True)
+                if preview > 0 and data.get("body"):
+                    data["body"] = data["body"][:preview]
+                results.append(data)
+            except Exception:
+                continue
+        _dbg(f"flagged: scanned {scanned} items, {_todo_calls} PropertyAccessor calls, {len(results)} matched")
+
     results.sort(key=lambda m: m.get("received") or "", reverse=True)
     _dbg("flagged: done")
     print(json.dumps(results, indent=2, default=str))
