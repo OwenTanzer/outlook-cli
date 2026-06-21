@@ -287,13 +287,17 @@ def list_emails(count, unread_only, flagged, folder, fmt):
         if limit is not None:
             collected = collected[:limit]
     elif unread_only and not flagged:
-        # DASL Restrict fast path for --unread-only: server-side filter on read state.
-        _dbg("list: using DASL Restrict fast path for --unread-only")
+        # DASL Restrict + Sort + early stop: same pattern as the unfiltered fast path.
+        # Restrict server-side to unread, sort newest-first, then stop at limit —
+        # avoids PropertyAccessor calls on the full unread backlog.
+        _dbg("list: using DASL Restrict + Sort fast path for --unread-only")
         restrict_ok = False
         try:
             restricted = items.Restrict('@SQL="urn:schemas:httpmail:read" = 0')
+            restricted.Sort("[ReceivedTime]", True)
             msg = restricted.GetFirst()
-            while msg:
+            target = limit if limit is not None else 2 ** 31
+            while msg and len(collected) < target:
                 scanned += 1
                 try:
                     if getattr(msg, "Class", None) == 43:
@@ -316,10 +320,9 @@ def list_emails(count, unread_only, flagged, folder, fmt):
                     collected.append(mail_to_dict(msg))
                 except Exception:
                     continue
-
-        collected.sort(key=lambda m: m.get("received") or "", reverse=True)
-        if limit is not None:
-            collected = collected[:limit]
+            collected.sort(key=lambda m: m.get("received") or "", reverse=True)
+            if limit is not None:
+                collected = collected[:limit]
     else:
         # Combined filters (--unread-only --flagged): full scan required.
         # Do NOT call items.Sort() — causes COM enumerator to skip items.
